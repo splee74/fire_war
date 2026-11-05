@@ -22,9 +22,10 @@
     color: var(--text);
     font-family: system-ui, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
     user-select: none;
-    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
   }
-  canvas { display: block; position: fixed; inset: 0; }
+  /* 터치 스크롤·확대는 게임 화면(캔버스)에서만 막는다. 메뉴·대장간은 휴대폰에서도 스크롤된다 */
+  canvas { display: block; position: fixed; inset: 0; touch-action: none; }
   #game3d { z-index: 0; }
   #game { z-index: 1; }
   .overlay {
@@ -33,6 +34,7 @@
     background: rgba(10, 6, 4, .72);
     padding: 16px;
     z-index: 10;
+    overflow-y: auto; /* 화면보다 긴 메뉴는 스크롤 */
   }
   .overlay.show { display: flex; }
   .box {
@@ -40,6 +42,7 @@
     border: 2px solid var(--accent);
     border-radius: 16px;
     padding: 24px;
+    margin: auto; /* 화면에 들어가면 가운데, 넘치면 위부터 스크롤 */
     width: 100%; max-width: 460px;
     text-align: center;
     box-shadow: 0 10px 40px rgba(0,0,0,.6);
@@ -837,6 +840,10 @@ function drawSprites2D(list, ox, oy) {
 const cvs = document.getElementById('game');
 const ctx = cvs.getContext('2d');
 let W = 0, H = 0, DPR = 1;
+// 시야 배율: 화면의 짧은 쪽이 VIEW_MIN보다 작으면(휴대폰) 세상을 그만큼 축소해 보여 준다.
+// VW·VH는 화면에 보이는 세상의 넓이(게임 단위). 글자·HUD는 축소하지 않는다
+const VIEW_MIN = 720;
+let VS = 1, VW = 0, VH = 0;
 function resize() {
   DPR = Math.min(window.devicePixelRatio || 1, 2);
   W = window.innerWidth;
@@ -846,7 +853,10 @@ function resize() {
   cvs.style.width = W + 'px';
   cvs.style.height = H + 'px';
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-  if (ready3D) Render3D.resize(W, H, DPR);
+  VS = Math.min(1, Math.min(W, H) / VIEW_MIN);
+  VW = W / VS;
+  VH = H / VS;
+  if (ready3D) Render3D.resize(W, H, DPR, VS);
 }
 let ready3D = false; // 3D 렌더러 준비가 끝나면 true
 window.addEventListener('resize', resize);
@@ -1026,7 +1036,7 @@ function spawnEnemy(elite) {
   const unlocked = ENEMY_TYPES.filter(t => G.time >= t.from);
   const t = elite ? unlocked[unlocked.length - 1] : pickType(unlocked);
   const a = Math.random() * Math.PI * 2;
-  const d = Math.hypot(W, H) / 2 + 40;
+  const d = Math.hypot(VW, VH) / 2 + 40;
   G.enemies.push(makeEnemy(t, G.p.x + Math.cos(a) * d, G.p.y + Math.sin(a) * d, elite));
 }
 
@@ -1072,7 +1082,7 @@ function spawnBoss(B) {
   const scale = 1 + G.time / 90 + Math.pow(G.time / 360, 2);
   const a = Math.random() * Math.PI * 2;
   // 이펙트가 있으면 화면 안에 차원문을 열고 그 자리에서 솟아오르게 한다
-  const d = FXP.ready ? 280 : Math.hypot(W, H) / 2 + 80;
+  const d = FXP.ready ? 280 : Math.hypot(VW, VH) / 2 + 80;
   const e = {
     x: G.p.x + Math.cos(a) * d, y: G.p.y + Math.sin(a) * d,
     spawnT: FXP.ready ? 1.6 : 0, // 차원문에서 나오는 동안은 움직이지 않고 피해도 받지 않는다
@@ -1287,7 +1297,7 @@ function updateEnemyProjectiles(dt) {
 
 function updateEnemies(dt) {
   const p = G.p;
-  const farLimit = Math.hypot(W, H) * 0.9;
+  const farLimit = Math.hypot(VW, VH) * 0.9;
   for (const e of G.enemies) {
     if (e.dead) continue;
     let dx = p.x - e.x, dy = p.y - e.y;
@@ -1306,7 +1316,7 @@ function updateEnemies(dt) {
     // 너무 멀어지면 플레이어 앞쪽으로 다시 배치
     if (dist > farLimit) {
       const a = Math.atan2(p.fy, p.fx) + (Math.random() - 0.5) * 1.6;
-      const d = Math.hypot(W, H) / 2 + 40;
+      const d = Math.hypot(VW, VH) / 2 + 40;
       e.x = p.x + Math.cos(a) * d;
       e.y = p.y + Math.sin(a) * d;
       continue;
@@ -1494,7 +1504,7 @@ function updateWeapons(dt) {
     wt.lightning -= dt;
     if (wt.lightning <= 0) {
       // 화면 안에 보이는 적 중에서 무작위로 골라 내리친다
-      const onScreen = G.enemies.filter(e => !e.dead && Math.abs(e.x - p.x) < W / 2 && Math.abs(e.y - p.y) < H / 2);
+      const onScreen = G.enemies.filter(e => !e.dead && Math.abs(e.x - p.x) < VW / 2 && Math.abs(e.y - p.y) < VH / 2);
       if (onScreen.length) {
         wt.lightning = s.cd * cdMult();
         SFX.play('zap');
@@ -1749,17 +1759,21 @@ function updateTexts(dt) {
 }
 
 // ===================== 그리기 =====================
+// 세상(바닥·적·이펙트)은 시야 배율로 축소해서, 글자·HUD는 화면 크기 그대로 그린다
+const worldTransform = () => ctx.setTransform(DPR * VS, 0, 0, DPR * VS, 0, 0);
+const screenTransform = () => ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+
 function drawLayer(pattern, x, y) {
   ctx.save();
-  ctx.translate(W / 2 - x, H / 2 - y);
+  ctx.translate(VW / 2 - x, VH / 2 - y);
   ctx.fillStyle = pattern;
-  ctx.fillRect(x - W / 2, y - H / 2, W, H);
+  ctx.fillRect(x - VW / 2, y - VH / 2, VW, VH);
   ctx.restore();
 }
 
 function drawGround(cx, cy) {
   ctx.fillStyle = '#080a1c';
-  ctx.fillRect(0, 0, W, H);
+  ctx.fillRect(0, 0, VW, VH);
   if (farPattern) drawLayer(farPattern, cx * 0.35, cy * 0.35);
   if (nearPattern) drawLayer(nearPattern, cx, cy);
 }
@@ -1813,15 +1827,19 @@ function drawChestPointer(x, y) {
 
 function draw() {
   if (use3D) { draw3D(); return; }
+  worldTransform();
   if (!G) {
     drawGround(0, 0);
+    screenTransform();
     return;
   }
   const p = G.p;
   let shx = 0, shy = 0;
   if (G.shake > 0) { shx = (Math.random() - 0.5) * 10; shy = (Math.random() - 0.5) * 10; }
   const cx = p.x + shx, cy = p.y + shy;
-  const ox = W / 2 - cx, oy = H / 2 - cy;
+  const ox = VW / 2 - cx, oy = VH / 2 - cy;
+  const W = VW, H = VH; // 이 아래 세상 그리기는 시야 넓이 기준 (화면 밖이면 건너뛰기)
+  const offChests = [];
 
   drawGround(cx, cy);
 
@@ -1829,7 +1847,7 @@ function draw() {
   for (const g of G.gems) {
     const x = g.x + ox, y = g.y + oy;
     if (g.chest) {
-      if (x < -20 || y < -20 || x > W + 20 || y > H + 20) { drawChestPointer(x, y); continue; }
+      if (x < -20 || y < -20 || x > W + 20 || y > H + 20) { offChests.push([x * VS, y * VS]); continue; }
       const pulse = 0.5 + Math.sin(G.time * 5) * 0.5;
       const glow = ctx.createRadialGradient(x, y, 0, x, y, 44);
       glow.addColorStop(0, `rgba(255,220,90,${0.55 + pulse * 0.3})`);
@@ -2018,11 +2036,15 @@ function draw() {
   ctx.fillRect(px - hpw / 2, py + 34, hpw * (p.hp / maxHp()), 6);
 
   drawSprites2D(sprites, ox, oy);
-  drawDamageTexts((x, y) => ({ x: x + ox, y: y + oy }));
+
+  // 여기부터는 화면 좌표 (축소하지 않는다)
+  screenTransform();
+  drawDamageTexts((x, y) => ({ x: (x + ox) * VS, y: (y + oy) * VS }));
+  for (const [x, y] of offChests) drawChestPointer(x, y);
 
   if (G.boss) {
     const bx = G.boss.x + ox, by = G.boss.y + oy;
-    if (bx < 0 || by < 0 || bx > W || by > H) drawBossPointer(bx, by);
+    if (bx < 0 || by < 0 || bx > W || by > H) drawBossPointer(bx * VS, by * VS);
   }
   drawLevelFlash();
   drawHud();
@@ -2072,7 +2094,7 @@ const VIEW_KEY = 'forgeSurvivor.view';
 const cvs3d = document.getElementById('game3d');
 let use3D = false;
 const has3D = Render3D.ok && Render3D.init(cvs3d);
-if (has3D) { ready3D = true; Render3D.resize(W, H, DPR); }
+if (has3D) { ready3D = true; Render3D.resize(W, H, DPR, VS); }
 function setView(want3D) {
   use3D = want3D && has3D;
   cvs3d.style.display = use3D ? 'block' : 'none';
@@ -2218,14 +2240,18 @@ function drawHud() {
   ];
   ctx.font = 'bold 12px system-ui, sans-serif';
   ctx.textAlign = 'right';
+  // 좁은 화면(휴대폰)에서는 오른쪽 버튼 앞에서 다음 줄로 넘긴다
+  const rowEnd = W - 100;
+  let y = 46;
   for (const [img, lv] of items) {
-    drawImg(img, 34, x + 17, 63);
+    if (x + 34 > rowEnd && x > 12) { x = 12; y += 38; }
+    drawImg(img, 34, x + 17, y + 17);
     ctx.strokeStyle = '#000a'; ctx.lineWidth = 1;
-    ctx.strokeRect(x + 0.5, 46.5, 34, 34);
+    ctx.strokeRect(x + 0.5, y + 0.5, 34, 34);
     ctx.fillStyle = '#000';
-    ctx.fillText(lv, x + 34, 67);
+    ctx.fillText(lv, x + 34, y + 21);
     ctx.fillStyle = '#ffd166';
-    ctx.fillText(lv, x + 33, 66);
+    ctx.fillText(lv, x + 33, y + 20);
     x += 38;
   }
   ctx.textBaseline = 'alphabetic';

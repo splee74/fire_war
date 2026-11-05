@@ -11,7 +11,7 @@ const Render3D = (() => {
   const STAIN = 1700;              // 넓은 얼룩 무늬 한 장의 크기
   const CAP = 450;                 // 종류별 최대 개수
 
-  let renderer, scene, camera, W = 1, H = 1;
+  let renderer, scene, camera, W = 1, H = 1, VW = 1, VH = 1; // W·H: 화면 크기, VW·VH: 보이는 세상 넓이
   let frame = 0;
   const target = new THREE.Vector3();
 
@@ -797,7 +797,7 @@ const Render3D = (() => {
 
   function drawProps(t) {
     for (const k in R.props) R.props[k].count = 0;
-    const spanX = W / 2 + 200, spanZ = H / 2 / Math.sin(ELEV) + 260;
+    const spanX = VW / 2 + 200, spanZ = VH / 2 / Math.sin(ELEV) + 260;
     const x0 = Math.floor((target.x - spanX) / CHUNK), x1 = Math.floor((target.x + spanX) / CHUNK);
     const z0 = Math.floor((target.z - spanZ) / CHUNK), z1 = Math.floor((target.z + spanZ) / CHUNK);
     for (let cx = x0; cx <= x1; cx++) {
@@ -823,7 +823,7 @@ const Render3D = (() => {
 
   // 떠다니는 빛 알갱이: 바닥에서 천천히 떠올라 사라진다 (세상에 고정되고 화면 둘레로 감겨 돈다)
   function drawMotes(t) {
-    const spanX = W + 240, spanZ = H / Math.sin(ELEV) + 240, TOP = 240;
+    const spanX = VW + 240, spanZ = VH / Math.sin(ELEV) + 240, TOP = 240;
     const wrap = (v, span) => ((v % span) + span) % span;
     for (let i = 0; i < 60; i++) {
       const a = (i * 0.6180339) % 1, b = (i * 0.3819660 + 0.37) % 1;
@@ -1172,13 +1172,17 @@ const Render3D = (() => {
     return true;
   }
 
-  function resize(w, h, dpr) {
+  // vs: 시야 배율 (휴대폰처럼 작은 화면에서는 1보다 작아 세상을 넓게 보여 준다)
+  function resize(w, h, dpr, vs = 1) {
     if (!renderer) return;
     W = w; H = h;
+    VW = w / vs; VH = h / vs;
     renderer.setPixelRatio(dpr);
-    renderer.setSize(w, h, false);
-    camera.left = -w / 2; camera.right = w / 2;
-    camera.top = h / 2; camera.bottom = -h / 2;
+    // 세 번째 인자 true: 캔버스의 화면 표시 크기(CSS)도 맞춘다.
+    // 빼면 화소 밀도가 높은 휴대폰에서 캔버스가 2~3배 크게 보인다
+    renderer.setSize(w, h, true);
+    camera.left = -VW / 2; camera.right = VW / 2;
+    camera.top = VH / 2; camera.bottom = -VH / 2;
     camera.updateProjectionMatrix();
   }
 
