@@ -762,7 +762,7 @@ const FXP = (() => {
 })();
 
 // 한 번에 너무 많이 쌓이지 않게 종류별 최대 개수를 둔다
-const PFX_CAP = { hit: 25, death: 40, bigDeath: 6, levelUp: 1, hurt: 2 };
+const PFX_CAP = { hit: 25, death: 40, bigDeath: 6, levelUp: 1, lvPillar: 1, lvBurst: 1, lvSparkle: 1, hurt: 2 };
 // 이펙트 하나를 띄운다. follow: 주인공을 따라다님, h: 바닥에서 띄울 높이, rot: 회전(진행 방향)
 function pfx(key, x, y, o = {}) {
   if (!FXP.ready || !G) return;
@@ -773,6 +773,19 @@ function pfx(key, x, y, o = {}) {
 function updatePfx(dt) {
   for (const f of G.pfx) f.t += dt * f.speed;
   G.pfx = G.pfx.filter(f => f.t < FXP.dur(f.key));
+  if (G.lvFlash > 0) G.lvFlash -= dt;
+}
+
+// 레벨업 순간 화면 전체가 금빛으로 번쩍였다가 가장자리부터 사그라든다
+function drawLevelFlash() {
+  if (!G || !(G.lvFlash > 0) || G.state === 'levelup') return;
+  const k = G.lvFlash / 0.6;
+  const g = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.max(W, H) * 0.75);
+  g.addColorStop(0, `rgba(255,236,150,${0.45 * k})`);
+  g.addColorStop(0.5, `rgba(255,200,80,${0.25 * k})`);
+  g.addColorStop(1, `rgba(255,170,40,${0.4 * k})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, W, H);
 }
 
 // 이번 프레임에 그릴 이펙트 목록 (2D·3D 공용). s: 크기 배율, a: 불투명도
@@ -1541,7 +1554,7 @@ function updateWeapons(dt) {
       p.attackKind = 'spin';
       const base = Math.atan2(p.fy, p.fx);
       // 회전 베기 그림은 주인공 둘레를 한 바퀴 도는 고리라서 한 번만 띄운다
-      if (FXP.ready) pfx('slash', p.x, p.y, { follow: true, h: 10, scale: s.radius * 2 / 185, speed: 1.3 });
+      if (FXP.ready) pfx('slash', p.x, p.y, { follow: true, h: 10, scale: s.radius * 2 / 185 * 1.5, speed: 1.3 });
       for (let i = 0; i < s.count; i++) {
         const a = base + i * Math.PI;
         if (!FXP.ready) G.zones.push({ kind: 'slash', x: p.x, y: p.y, a, r: s.radius, life: 0.22, max: 0.22 });
@@ -1668,8 +1681,13 @@ function weaponDesc(id, lv) {
 
 function showLevelUp() {
   G.state = 'levelup';
-  // 선택 창이 닫히면 주인공을 감싸는 금빛 기둥과 LEVEL UP! 글자가 재생된다
-  pfx('levelUp', G.p.x, G.p.y, { follow: true, scale: 1.4, speed: 1.2 });
+  // 선택 창이 닫히면 재생된다: 하늘에서 쏟아지는 빛줄기, 금빛 섬광과 고리, 반짝임,
+  // 주인공을 감싸는 금빛 기둥과 LEVEL UP! 글자, 그리고 화면 전체가 금빛으로 번쩍인다
+  pfx('lvPillar', G.p.x, G.p.y, { follow: true, scale: 1.6, speed: 1.5 });
+  pfx('lvBurst', G.p.x, G.p.y, { follow: true, scale: 1.7 });
+  pfx('lvSparkle', G.p.x, G.p.y, { follow: true, h: 45, scale: 2.2 });
+  pfx('levelUp', G.p.x, G.p.y, { follow: true, scale: 1.9, speed: 1.2 });
+  G.lvFlash = 0.6;
   SFX.play('levelup');
   const opts = rollOptions();
   const box = document.getElementById('options');
@@ -2005,6 +2023,7 @@ function draw() {
     const bx = G.boss.x + ox, by = G.boss.y + oy;
     if (bx < 0 || by < 0 || bx > W || by > H) drawBossPointer(bx, by);
   }
+  drawLevelFlash();
   drawHud();
   drawBossUi();
   drawStick();
@@ -2096,6 +2115,7 @@ function draw3D() {
     const s = P(G.boss.x, G.boss.y);
     if (s.x < 0 || s.y < 0 || s.x > W || s.y > H) drawBossPointer(s.x, s.y);
   }
+  drawLevelFlash();
   drawHud();
   drawBossUi();
   drawStick();

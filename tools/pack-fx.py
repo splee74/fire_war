@@ -29,6 +29,9 @@ EFFECTS = {
     'hit':       ('impacts/hit-spark', 0, None),
     'bossSpawn': ('spawn/spawn-portal', 0, None),
     'levelUp':   ('ui/level-up', 0, None),
+    'lvPillar':  ('holy/holy-pillar', 0, 50),             # 레벨업: 하늘에서 내리는 빛줄기 (사라지는 꼬리는 뺌)
+    'lvBurst':   ('arcane/mana-burst', 0, None),          # 레벨업: 금빛 섬광과 고리 (금색 팔레트로 내보냄)
+    'lvSparkle': ('pickups/collect-burst', 0, None),      # 레벨업: 십자 섬광과 반짝임
     'hurt':      ('impacts/blunt-hit', 0, None),
     'death':     ('spawn/poof', 0, None),
     'bigDeath':  ('explosions/plasma-explosion', 0, None),

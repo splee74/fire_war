@@ -846,7 +846,8 @@ const Render3D = (() => {
     death:  ['Death_A', 'Death', 'death'],
     cheer:  ['Cheer', 'Victory', 'cheer'],
   };
-  const ONE_SHOT = { slice: 1.6, spin: 1.5, death: 1, cheer: 1 }; // 한 번만 재생 (값은 재생 속도)
+  const ONE_SHOT = { slice: 2.3, spin: 2.0, death: 1, cheer: 1 }; // 한 번만 재생 (값은 재생 속도)
+  const SWING_RANGE = 300; // 이 거리 안에 적이 있으면 쉬지 않고 칼을 휘두른다
   const HERO_HEIGHT = 125;
   // 상체 뼈 (three.js가 이름의 '.'을 지워 'upperarm.l'은 'upperarml'이 된다). 나머지는 하체
   const UPPER_BONES = /^(spine|chest|head|(upperarm|lowerarm|wrist|hand|handslot|elbowIK|handIK)\.?[lr])$/;
@@ -942,10 +943,18 @@ const Render3D = (() => {
     H.t += dt;
     const over = G && G.state === 'over';
     const moving = p.moving && running;
-    // 무기를 쏘면 새 공격이 시작된다. 휘두르는 도중에는 끝날 때까지 기다린다
+    // 무기를 쏘거나 근처에 적이 있으면 새 공격이 시작된다. 휘두르는 도중에는 끝날 때까지 기다린다
     let newAttack = false;
-    if (!over && running && p.attackT > H.lastAttackT + 0.01 && H.t >= H.lockUntil) {
-      H.attack = p.attackKind === 'spin' ? 'spin' : 'slice';
+    const fired = p.attackT > H.lastAttackT + 0.01;
+    let enemyNear = false;
+    if (G && !fired) {
+      for (const e of G.enemies) {
+        if (!e.dead && Math.abs(e.x - p.x) < SWING_RANGE && Math.abs(e.y - p.y) < SWING_RANGE) { enemyNear = true; break; }
+      }
+    }
+    if (!over && running && (fired || enemyNear) && H.t >= H.lockUntil) {
+      // 초승달 베기가 막 발동했으면 회전베기, 그 밖에는 내려베기
+      H.attack = fired && p.attackKind === 'spin' ? 'spin' : 'slice';
       const a = H.actions.upper[H.attack];
       if (a) {
         H.lockUntil = H.t + a.getClip().duration / a.timeScale * 0.85;
