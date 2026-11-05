@@ -33,6 +33,7 @@
 ## 사용한 에셋
 - 3D 주인공 모델: [KayKit Character Pack: Adventurers](https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0) — Kay Lousberg ([kaylousberg.com](https://www.kaylousberg.com)), CC0
 - 3D 렌더링: [three.js](https://threejs.org) r159, MIT License
+- 픽셀 아트 이펙트: [pixelfx](https://github.com/patch-gg/pixelfx) — Patch, MIT License (`fx/fxdata.js`, `tools/pack-fx.py`로 묶음)
 
 ### 주인공 모델 바꾸기
 애니메이션이 들어 있는 GLB 파일을 준비한 뒤, 아래 명령으로 `models/hero.js`를 다시 만들면 돼요.

@@ -539,6 +539,62 @@ const Render3D = (() => {
     });
   }
 
+  // ---------- pixelfx 이펙트 (카메라를 향한 판) ----------
+  // 이펙트마다 그림 한 장을 공유하고, 판마다 텍스처 복사본의 위치(offset)만 바꿔 프레임을 고른다
+  const SP = {};
+  function initSprites(data, images) {
+    for (const [key, d] of Object.entries(data)) {
+      const im = images[key];
+      if (!im) continue;
+      const tex = new THREE.Texture(im);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.magFilter = THREE.NearestFilter; // 픽셀 아트가 번지지 않게
+      tex.minFilter = THREE.NearestFilter;
+      tex.generateMipmaps = false;
+      const rows = Math.ceil(d.n / d.cols);
+      tex.repeat.set(1 / d.cols, 1 / rows);
+      tex.needsUpdate = true;
+      // 판의 원점이 이펙트의 기준점(발밑·중심)에 오도록 옮긴다
+      const geo = new THREE.PlaneGeometry(d.w, d.h).translate(d.w / 2 - d.px, d.py - d.h / 2, 0);
+      SP[key] = { d, rows, tex, geo, meshes: [], used: 0 };
+    }
+  }
+  function spriteMesh(s) {
+    let m = s.meshes[s.used];
+    if (!m) {
+      const map = s.tex.clone();
+      map.needsUpdate = true;
+      m = new THREE.Mesh(s.geo, new THREE.MeshBasicMaterial({ map, transparent: true, depthTest: false, depthWrite: false }));
+      m.renderOrder = 20;
+      scene.add(m);
+      s.meshes.push(m);
+    }
+    s.used++;
+    m.visible = true;
+    return m;
+  }
+  const _rz = new THREE.Quaternion(), _zAxis = new THREE.Vector3(0, 0, 1);
+  function drawSprites(list) {
+    for (const k in SP) SP[k].used = 0;
+    for (const sp of list) {
+      const s = SP[sp.key];
+      if (!s) continue;
+      const m = spriteMesh(s);
+      const col = sp.f % s.d.cols, row = Math.floor(sp.f / s.d.cols);
+      m.material.map.offset.set(col / s.d.cols, 1 - (row + 1) / s.rows);
+      m.material.opacity = sp.a;
+      m.position.set(sp.x, sp.h, sp.y);
+      m.scale.setScalar(sp.s);
+      // 바닥 위 진행 방향을 화면에 비친 각도로 바꿔 판을 돌린다 (화면 위쪽이 +y라 부호가 반대)
+      const screenAngle = sp.rot ? Math.atan2(Math.sin(sp.rot) * Math.sin(ELEV), Math.cos(sp.rot)) : 0;
+      m.quaternion.copy(camera.quaternion).multiply(_rz.setFromAxisAngle(_zAxis, -screenAngle));
+    }
+    for (const k in SP) {
+      const s = SP[k];
+      for (let i = s.used; i < s.meshes.length; i++) s.meshes[i].visible = false;
+    }
+  }
+
   // ---------- 매 프레임 ----------
   const WHITE = new THREE.Color(1, 1, 1), FLASH = new THREE.Color(2.4, 2.4, 2.4);
   const SLOW = new THREE.Color(0.6, 0.85, 1.7), WINDUP = new THREE.Color(2.2, 0.6, 0.5);
@@ -696,7 +752,7 @@ const Render3D = (() => {
     const px = G.p.x, py = G.p.y;
     for (const k in R.enemies) R.enemies[k].count = 0;
     for (const e of G.enemies) {
-      if (e.dead) continue;
+      if (e.dead || e.spawnT > 0) continue; // 차원문에서 나오는 중인 보스는 아직 그리지 않는다
       const face = Math.atan2(px - e.x, py - e.y);
       if (e.elite) {
         // 정예와 보스는 날개를 퍼덕이는 드래곤
@@ -760,11 +816,12 @@ const Render3D = (() => {
     finish(R.gem);
   }
 
-  function drawProjectiles(G, t) {
+  // useSprites: pixelfx가 불화살·쇠뇌·수리검을 그리면 여기서는 단검과 탄막만 그린다
+  function drawProjectiles(G, t, useSprites) {
     for (const k in R.proj) R.proj[k].count = 0;
     for (const pr of G.projs) {
       const m = R.proj[pr.kind];
-      if (!m) continue;
+      if (!m || (useSprites && pr.kind !== 'dagger')) continue;
       if (pr.kind === 'bow') {
         put(m, pr.x, 26, pr.y, 0, 8, 8, 8);
         putGlow(pr.x, 26, pr.y, 46, FIRE);
@@ -777,7 +834,7 @@ const Render3D = (() => {
 
     // 회전 수리검
     R.star.count = 0;
-    if (G.weapons.hammer) {
+    if (G.weapons.hammer && !useSprites) {
       const s = wstats('hammer');
       for (let i = 0; i < s.count; i++) {
         const a = G.wt.hammerAngle + i * Math.PI * 2 / s.count;
@@ -797,8 +854,9 @@ const Render3D = (() => {
     finish(R.bullet);
   }
 
-  function drawZones(G, t) {
+  function drawZones(G, t, useSprites) {
     for (const z of G.zones) {
+      if (useSprites && z.kind === 'vortex') continue; // 소용돌이는 pixelfx로
       const k = z.life / z.max; // 1 → 0
       if (z.kind === 'bolt') {
         const g = R.bolts.get(z);
@@ -859,7 +917,8 @@ const Render3D = (() => {
   }
 
   let lastRender = performance.now();
-  function render(G, shakeX = 0, shakeY = 0) {
+  // sprites: 이번 프레임에 그릴 pixelfx 이펙트 목록 (없으면 예전 도형 효과로 그린다)
+  function render(G, shakeX = 0, shakeY = 0, sprites = null) {
     frame++;
     const now = performance.now();
     const dt = Math.min(0.05, (now - lastRender) / 1000);
@@ -872,8 +931,8 @@ const Render3D = (() => {
     if (G) {
       drawEnemies(G, t);
       drawItems(G, t);
-      drawProjectiles(G, t);
-      drawZones(G, t);
+      drawProjectiles(G, t, !!sprites);
+      drawZones(G, t, !!sprites);
     } else {
       for (const k in R.enemies) R.enemies[k].count = 0;
       for (const k in R.proj) R.proj[k].count = 0;
@@ -883,6 +942,7 @@ const Render3D = (() => {
     for (const pool of [R.chests, R.bursts, R.bolts, R.novas, R.vortexes, R.slashes]) pool.sweep();
     finish(R.shadow);
     finish(R.glow);
+    drawSprites(sprites || []);
     renderer.render(scene, camera);
   }
 
@@ -893,5 +953,5 @@ const Render3D = (() => {
     return { x: (_proj.x + 1) / 2 * W, y: (1 - _proj.y) / 2 * H };
   }
 
-  return { ok: true, init, resize, render, project };
+  return { ok: true, init, resize, render, project, initSprites };
 })();

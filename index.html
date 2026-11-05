@@ -324,6 +324,7 @@
 <script src="lib/three.min.js"></script>
 <script src="lib/GLTFLoader.js"></script>
 <script src="models/hero.js"></script>
+<script src="fx/fxdata.js"></script>
 <script src="render3d.js"></script>
 <div class="overlay" id="modalBg">
   <div class="box">
@@ -759,6 +760,89 @@ const PASSIVES = {
   herb:    { name: '회복 물약',     img: 'icon_potion', max: 5, desc: '초당 체력 회복 +0.4' },
 };
 
+// ===================== pixelfx 이펙트 =====================
+// fx/fxdata.js(tools/pack-fx.py로 생성)에 담긴 픽셀 아트 이펙트 시트를 재생한다.
+// 2D 화면은 캔버스에 직접, 3D 화면은 Render3D가 카메라를 향한 판으로 그린다.
+// 데이터를 못 불러오면 FXP.ready가 false라서 예전 도형 효과가 그대로 쓰인다.
+const FXP = (() => {
+  const data = window.FX_DATA || {};
+  const img = {};
+  let ready = false;
+  function load() {
+    return Promise.all(Object.entries(data).map(([k, d]) => new Promise(res => {
+      const im = new Image();
+      im.onload = () => { img[k] = im; res(); };
+      im.onerror = res;
+      im.src = d.img;
+    }))).then(() => { ready = Object.keys(img).length === Object.keys(data).length && Object.keys(data).length > 0; });
+  }
+  const dur = k => data[k].n / data[k].fps;
+  function frameAt(k, t) {
+    const d = data[k];
+    const f = Math.floor(t * d.fps);
+    return d.loop ? ((f % d.n) + d.n) % d.n : Math.min(d.n - 1, Math.max(0, f));
+  }
+  return { load, data, img, dur, frameAt, get ready() { return ready; } };
+})();
+
+// 한 번에 너무 많이 쌓이지 않게 종류별 최대 개수를 둔다
+const PFX_CAP = { hit: 25, death: 40, bigDeath: 6, levelUp: 1, hurt: 2 };
+// 이펙트 하나를 띄운다. follow: 주인공을 따라다님, h: 바닥에서 띄울 높이, rot: 회전(진행 방향)
+function pfx(key, x, y, o = {}) {
+  if (!FXP.ready || !G) return;
+  const cap = PFX_CAP[key];
+  if (cap && G.pfx.reduce((n, f) => n + (f.key === key), 0) >= cap) return;
+  G.pfx.push({ key, x, y, t: 0, speed: o.speed || 1, scale: o.scale || 1, h: o.h || 0, rot: o.rot || 0, follow: !!o.follow });
+}
+function updatePfx(dt) {
+  for (const f of G.pfx) f.t += dt * f.speed;
+  G.pfx = G.pfx.filter(f => f.t < FXP.dur(f.key));
+}
+
+// 이번 프레임에 그릴 이펙트 목록 (2D·3D 공용). s: 크기 배율, a: 불투명도
+function collectSprites() {
+  const out = [];
+  if (!FXP.ready || !G) return out;
+  const p = G.p;
+  for (const z of G.zones) {
+    if (z.kind !== 'vortex') continue;
+    out.push({ key: 'vortex', f: FXP.frameAt('vortex', G.time), x: z.x, y: z.y, h: 0, s: z.r * 2 / 110, rot: 0,
+      a: Math.max(0, Math.min(1, z.life / 0.4, (z.max - z.life) / 0.2)) });
+  }
+  for (const pr of G.projs) {
+    if (pr.kind === 'bow') out.push({ key: 'fireball', f: FXP.frameAt('fireball', G.time + pr.angle), x: pr.x, y: pr.y, h: 26, s: 0.9, rot: pr.angle, a: 1 });
+    else if (pr.kind === 'trident') out.push({ key: 'arrow', f: FXP.frameAt('arrow', G.time + pr.angle), x: pr.x, y: pr.y, h: 26, s: 1.9, rot: pr.angle, a: 1 });
+  }
+  if (G.weapons.hammer) {
+    const s = wstats('hammer');
+    for (let i = 0; i < s.count; i++) {
+      const a = G.wt.hammerAngle + i * Math.PI * 2 / s.count;
+      out.push({ key: 'shuriken', f: FXP.frameAt('shuriken', G.time + i * 0.1),
+        x: p.x + Math.cos(a) * s.radius, y: p.y + Math.sin(a) * s.radius, h: 28, s: 0.85, rot: a + Math.PI / 2, a: 1 });
+    }
+  }
+  for (const f of G.pfx) {
+    out.push({ key: f.key, f: FXP.frameAt(f.key, f.t), x: f.follow ? p.x : f.x, y: f.follow ? p.y : f.y, h: f.h, s: f.scale, rot: f.rot, a: 1 });
+  }
+  return out;
+}
+
+// 2D 화면에 이펙트를 그린다 (픽셀이 뭉개지지 않게 확대 보간을 끈다)
+function drawSprites2D(list, ox, oy) {
+  ctx.imageSmoothingEnabled = false;
+  for (const sp of list) {
+    const d = FXP.data[sp.key], im = FXP.img[sp.key];
+    const sx = (sp.f % d.cols) * d.w, sy = Math.floor(sp.f / d.cols) * d.h;
+    ctx.save();
+    ctx.globalAlpha = sp.a;
+    ctx.translate(sp.x + ox, sp.y + oy - sp.h);
+    if (sp.rot) ctx.rotate(sp.rot);
+    ctx.drawImage(im, sx, sy, d.w, d.h, -d.px * sp.s, -d.py * sp.s, d.w * sp.s, d.h * sp.s);
+    ctx.restore();
+  }
+  ctx.imageSmoothingEnabled = true;
+}
+
 // ===================== 캔버스 =====================
 const cvs = document.getElementById('game');
 const ctx = cvs.getContext('2d');
@@ -816,6 +900,7 @@ function newGame() {
     fx: [],
     zones: [],   // 번개·서리·소용돌이·베기 같은 범위 효과
     eprojs: [],  // 적이 쏜 화살
+    pfx: [],     // 재생 중인 pixelfx 이펙트
     bossIdx: 0,   // 다음에 나올 보스 번호
     boss: null,   // 지금 싸우는 보스
     bossKills: 0,
@@ -988,9 +1073,11 @@ const BOSSES = [
 function spawnBoss(B) {
   const scale = 1 + G.time / 90 + Math.pow(G.time / 360, 2);
   const a = Math.random() * Math.PI * 2;
-  const d = Math.hypot(W, H) / 2 + 80;
+  // 이펙트가 있으면 화면 안에 차원문을 열고 그 자리에서 솟아오르게 한다
+  const d = FXP.ready ? 280 : Math.hypot(W, H) / 2 + 80;
   const e = {
     x: G.p.x + Math.cos(a) * d, y: G.p.y + Math.sin(a) * d,
+    spawnT: FXP.ready ? 1.6 : 0, // 차원문에서 나오는 동안은 움직이지 않고 피해도 받지 않는다
     img: B.img, ai: 'boss', boss: B,
     hp: B.hp * scale, maxHp: B.hp * scale,
     speed: B.speed, dmg: B.dmg, r: B.r, xp: 0,
@@ -1001,6 +1088,7 @@ function spawnBoss(B) {
   G.enemies.push(e);
   G.boss = e;
   G.shake = 0.6;
+  pfx('bossSpawn', e.x, e.y, { scale: 1.9 });
   showBanner(`⚠️ ${B.name} 출현!`, B.final ? '쓰러뜨리면 승리!' : '체력이 절반 아래로 떨어지면 격노해요');
   SFX.play('boss');
 }
@@ -1099,8 +1187,13 @@ function bossDefeated(e) {
   G.bossKills++;
   G.shake = 0.8;
   SFX.play('bossdown');
-  for (let i = 0; i < 8; i++) {
-    G.fx.push({ x: e.x + (Math.random() - 0.5) * e.r * 2, y: e.y + (Math.random() - 0.5) * e.r * 2, size: e.r * 3, life: 0.3 + i * 0.05, rot: Math.random() * 6 });
+  if (FXP.ready) {
+    pfx('bigDeath', e.x, e.y, { scale: 2.2 });
+    for (let i = 0; i < 4; i++) pfx('bigDeath', e.x + (Math.random() - 0.5) * e.r * 3, e.y + (Math.random() - 0.5) * e.r * 2, { scale: 1, speed: 0.8 + Math.random() * 0.5 });
+  } else {
+    for (let i = 0; i < 8; i++) {
+      G.fx.push({ x: e.x + (Math.random() - 0.5) * e.r * 2, y: e.y + (Math.random() - 0.5) * e.r * 2, size: e.r * 3, life: 0.3 + i * 0.05, rot: Math.random() * 6 });
+    }
   }
   showBanner(`💥 ${B.name} 처치!`, B.final ? '차원의 균열이 닫혀요…' : '보상이 쏟아져요');
   if (B.final) {
@@ -1122,7 +1215,7 @@ function bossDefeated(e) {
 }
 
 function damageEnemy(e, amount, kx, ky) {
-  if (e.dead) return;
+  if (e.dead || e.spawnT > 0) return;
   // 피해량은 ±15% 흔들리고, 일정 확률로 치명타(2.2배)가 터진다
   const crit = Math.random() < critChance();
   const dmg = Math.max(1, Math.round(amount * dmgMult() * (0.85 + Math.random() * 0.3) * (crit ? CRIT_MULT : 1)));
@@ -1132,11 +1225,18 @@ function damageEnemy(e, amount, kx, ky) {
   if (!e.elite && (kx || ky)) { e.x += kx * kb; e.y += ky * kb; }
   addText(e.x, e.y - e.r, dmg, crit, e.elite);
   SFX.play(crit ? 'crit' : 'hit');
+  if (crit) pfx('hit', e.x, e.y, { h: e.r, scale: 1, rot: Math.atan2(ky, kx) || Math.random() * 6 });
   if (e.hp <= 0) {
     e.dead = true;
     G.kills++;
     SFX.play('kill');
-    if (G.fx.length < 40) G.fx.push({ x: e.x, y: e.y, size: e.r * 3, life: 0.3, rot: Math.random() * Math.PI * 2 });
+    // 처치 효과: 잡몹은 연기 펑, 정예는 에너지 폭발 (보스는 bossDefeated에서)
+    if (FXP.ready) {
+      if (!e.elite) pfx('death', e.x, e.y, { scale: Math.max(0.7, e.r / 16) });
+      else if (!e.boss) pfx('bigDeath', e.x, e.y, { scale: 1.3 });
+    } else if (G.fx.length < 40) {
+      G.fx.push({ x: e.x, y: e.y, size: e.r * 3, life: 0.3, rot: Math.random() * Math.PI * 2 });
+    }
     // 전리품: 정예는 상자와 용의 비늘, 일반 몹은 낮은 확률로 마정석
     if (e.boss) {
       bossDefeated(e);
@@ -1192,6 +1292,7 @@ function updateEnemies(dt) {
     let dx = p.x - e.x, dy = p.y - e.y;
     const dist = Math.hypot(dx, dy) || 1;
     if (e.ai === 'boss') {
+      if (e.spawnT > 0) { e.spawnT -= dt; continue; }
       const m = bossTick(e, dt, dx, dy, dist);
       const slow = e.slowT > 0 ? 0.75 : 1; // 보스는 둔화에 강하다
       if (e.slowT > 0) e.slowT -= dt;
@@ -1264,6 +1365,7 @@ function hurtPlayer(dmg) {
   p.invuln = 0.5;
   G.shake = 0.25;
   SFX.play('hurt');
+  pfx('hurt', p.x, p.y, { follow: true, h: 45, scale: 1.1 });
   if (p.hp <= 0) {
     p.hp = 0;
     endGame(false);
@@ -1397,7 +1499,8 @@ function updateWeapons(dt) {
         SFX.play('zap');
         for (let i = 0; i < s.count && onScreen.length; i++) {
           const t = onScreen.splice(Math.floor(Math.random() * onScreen.length), 1)[0];
-          G.zones.push({ kind: 'bolt', x: t.x, y: t.y, life: 0.3, max: 0.3 });
+          if (FXP.ready) pfx('lightning', t.x, t.y, { scale: 1.1, speed: 1.3 });
+          else G.zones.push({ kind: 'bolt', x: t.x, y: t.y, life: 0.3, max: 0.3 });
           queryEnemies(t.x, t.y, 60, near);
           for (const e of near) {
             if (Math.hypot(e.x - t.x, e.y - t.y) < 45 + e.r) damageEnemy(e, s.dmg, 0, 0);
@@ -1413,7 +1516,9 @@ function updateWeapons(dt) {
     if (wt.frost <= 0) {
       wt.frost = s.cd * cdMult();
       SFX.play('frost');
-      G.zones.push({ kind: 'nova', x: p.x, y: p.y, r: s.radius, life: 0.4, max: 0.4 });
+      // 얼음 고리 그림(가로 약 230px)이 공격 범위에 맞도록 크기를 맞추고 2.2배 빠르게 재생
+      if (FXP.ready) pfx('frost', p.x, p.y, { scale: s.radius * 2 / 230, speed: 2.2 });
+      else G.zones.push({ kind: 'nova', x: p.x, y: p.y, r: s.radius, life: 0.4, max: 0.4 });
       queryEnemies(p.x, p.y, s.radius + 30, near);
       for (const e of near) {
         const d = Math.hypot(e.x - p.x, e.y - p.y);
@@ -1448,9 +1553,11 @@ function updateWeapons(dt) {
       p.attackT = 0.25;
       p.attackKind = 'spin';
       const base = Math.atan2(p.fy, p.fx);
+      // 회전 베기 그림은 주인공 둘레를 한 바퀴 도는 고리라서 한 번만 띄운다
+      if (FXP.ready) pfx('slash', p.x, p.y, { follow: true, h: 10, scale: s.radius * 2 / 185, speed: 1.3 });
       for (let i = 0; i < s.count; i++) {
         const a = base + i * Math.PI;
-        G.zones.push({ kind: 'slash', x: p.x, y: p.y, a, r: s.radius, life: 0.22, max: 0.22 });
+        if (!FXP.ready) G.zones.push({ kind: 'slash', x: p.x, y: p.y, a, r: s.radius, life: 0.22, max: 0.22 });
         queryEnemies(p.x, p.y, s.radius + 30, near);
         for (const e of near) {
           const dx = e.x - p.x, dy = e.y - p.y;
@@ -1497,6 +1604,7 @@ function updateProjectiles(dt) {
         pr.hit.add(e);
         const sp = Math.hypot(pr.vx, pr.vy);
         damageEnemy(e, pr.dmg, pr.vx / sp, pr.vy / sp);
+        if (pr.kind !== 'bow') pfx('hit', e.x, e.y, { h: e.r, scale: 0.7, rot: pr.angle });
         if (--pr.pierce <= 0) pr.life = 0;
       }
     }
@@ -1573,6 +1681,8 @@ function weaponDesc(id, lv) {
 
 function showLevelUp() {
   G.state = 'levelup';
+  // 선택 창이 닫히면 주인공을 감싸는 금빛 기둥과 LEVEL UP! 글자가 재생된다
+  pfx('levelUp', G.p.x, G.p.y, { follow: true, scale: 1.4, speed: 1.2 });
   SFX.play('levelup');
   const opts = rollOptions();
   const box = document.getElementById('options');
@@ -1744,9 +1854,12 @@ function draw() {
     ctx.drawImage(gemSprite(color), x - 20, y - 20 + bob, 40, 40);
   }
 
+  // pixelfx 이펙트가 있으면 무기 효과는 그쪽으로 그리고, 아래 예전 그림은 건너뛴다
+  const sprites = collectSprites();
+
   // 소용돌이 (적 아래에 깔린다)
   for (const z of G.zones) {
-    if (z.kind !== 'vortex') continue;
+    if (z.kind !== 'vortex' || FXP.ready) continue;
     ctx.save();
     ctx.globalAlpha = Math.min(1, z.life / 0.4, (z.max - z.life) / 0.2);
     ctx.translate(z.x + ox, z.y + oy);
@@ -1759,6 +1872,7 @@ function draw() {
   for (const e of G.enemies) {
     const x = e.x + ox, y = e.y + oy;
     if (x < -e.r * 2 || y < -e.r * 2 || x > W + e.r * 2 || y > H + e.r * 2) continue;
+    if (e.spawnT > 0) continue; // 차원문에서 나오는 중
     if (e.boss) {
       // 보스: 색깔 후광이 맥박처럼 커졌다 작아진다 (격노하면 더 크고 붉게)
       const pr = e.r * (e.enraged ? 2.1 : 1.7) * (1 + Math.sin(G.time * 6) * 0.08);
@@ -1792,8 +1906,9 @@ function draw() {
     }
   }
 
-  // 투사체
+  // 투사체 (불화살과 쇠뇌 화살은 pixelfx로 그린다)
   for (const pr of G.projs) {
+    if (FXP.ready && (pr.kind === 'bow' || pr.kind === 'trident')) continue;
     ctx.save();
     ctx.translate(pr.x + ox, pr.y + oy);
     const k = PROJ[pr.kind];
@@ -1854,8 +1969,8 @@ function draw() {
     ctx.restore();
   }
 
-  // 회전 망치
-  if (G.weapons.hammer) {
+  // 회전 수리검 (pixelfx가 없을 때)
+  if (G.weapons.hammer && !FXP.ready) {
     const s = wstats('hammer');
     for (let i = 0; i < s.count; i++) {
       const a = G.wt.hammerAngle + i * Math.PI * 2 / s.count;
@@ -1896,6 +2011,7 @@ function draw() {
   ctx.fillStyle = p.hp / maxHp() > 0.3 ? '#6fd36f' : '#ff5d5d';
   ctx.fillRect(px - hpw / 2, py + 34, hpw * (p.hp / maxHp()), 6);
 
+  drawSprites2D(sprites, ox, oy);
   drawDamageTexts((x, y) => ({ x: x + ox, y: y + oy }));
 
   if (G.boss) {
@@ -1966,7 +2082,7 @@ function draw3D() {
   ctx.clearRect(0, 0, W, H);
   let shx = 0, shy = 0;
   if (G && G.shake > 0) { shx = (Math.random() - 0.5) * 10; shy = (Math.random() - 0.5) * 10; }
-  Render3D.render(G, shx, shy);
+  Render3D.render(G, shx, shy, FXP.ready ? collectSprites() : null);
   if (!G) return;
   const P = (x, y, h = 0) => Render3D.project(x, y, h);
   const p = G.p;
@@ -2690,6 +2806,7 @@ function update(dt) {
   if (G.state !== 'play') return; // 적 화살에 쓰러졌으면 중단
   updateGems(dt);
   updateTexts(dt);
+  updatePfx(dt);
   if (G.banner && (G.banner.life -= dt) <= 0) G.banner = null;
   if (G.winAt && G.time >= G.winAt) { endGame(true); return; }
   if (G.pendingLevels > 0) showLevelUp();
@@ -2729,31 +2846,32 @@ showMenu();
 const startBtn = $id('startBtn');
 startBtn.disabled = true;
 startBtn.textContent = '불러오는 중…';
-loadImages().then(() => {
+Promise.all([loadImages(), FXP.load()]).then(() => {
   buildTints();
   buildGround();
+  if (has3D && FXP.ready) Render3D.initSprites(FXP.data, FXP.img);
   startBtn.disabled = false;
   startBtn.textContent = '⚔️ 출정';
   startBtn.onclick = startGame;
   requestAnimationFrame(loop);
   // 미리보기용: 주소 끝에 #demo를 붙이면 무기를 갖춘 채 4분 50초부터 바로 시작한다 (기록·전리품은 남지 않음)
-  // #demo-boss는 첫 보스가 바로 옆에 나타난 장면부터 시작한다
-  if (location.hash === '#demo' || location.hash === '#demo-boss') {
+  // #demo-boss는 첫 보스가 차원문에서 나오는 장면부터, 끝에 -2d를 붙이면 2D 화면으로 시작한다
+  const demo = location.hash.match(/^#demo(-boss)?(-2d)?$/);
+  if (demo) {
+    if (demo[2]) setView(false);
     startGame();
     G.demo = true;
     for (const id of ['dagger', 'hammer', 'bow', 'lightning', 'frost', 'vortex', 'slash']) G.weapons[id] = 5;
     G.time = 290;
     G.nextElite = 292;
-    if (location.hash === '#demo-boss') {
+    if (demo[1]) {
       G.time = 300;
       G.bossIdx = 1;
       spawnBoss(BOSSES[0]);
-      G.boss.x = G.p.x + 260;
-      G.boss.y = G.p.y - 60;
     }
     G.p.hp = G.bonusHp = 5000;
     // 적이 몰려온 장면부터 보이도록 8초를 미리 진행해 둔다
-    for (let i = 0; i < 480 && G.state === 'play'; i++) {
+    for (let i = 0; i < (demo[1] ? 48 : 480) && G.state === 'play'; i++) {
       G.p.x += 1.5; G.p.moving = true; G.p.fx = 1; G.p.fy = 0;
       update(1 / 60);
       if (G.state === 'levelup') applyOption(rollOptions()[0]);
