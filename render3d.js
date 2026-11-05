@@ -848,6 +848,8 @@ const Render3D = (() => {
   };
   const ONE_SHOT = { slice: 1.6, spin: 1.5, death: 1, cheer: 1 }; // 한 번만 재생 (값은 재생 속도)
   const HERO_HEIGHT = 125;
+  // 상체 뼈 (three.js가 이름의 '.'을 지워 'upperarm.l'은 'upperarml'이 된다). 나머지는 하체
+  const UPPER_BONES = /^(spine|chest|head|(upperarm|lowerarm|wrist|hand|handslot|elbowIK|handIK)\.?[lr])$/;
   // 보조 무기·방패는 숨기고 양손검만 들게 한다
   const HERO_HIDE = /^(1H_Sword|1H_Sword_Offhand|Badge_Shield|Rectangle_Shield|Round_Shield|Spike_Shield)$/;
 
@@ -887,34 +889,50 @@ const Render3D = (() => {
     holder.add(root);
     scene.add(holder);
 
+    // 애니메이션을 상체와 하체로 나눠 두 층으로 재생한다.
+    // 그래야 달리면서(하체) 칼을 휘두를(상체) 수 있다
     const mixer = new THREE.AnimationMixer(root);
-    const actions = {};
+    const actions = { upper: {}, lower: {} };
+    const boneOf = track => track.name.slice(0, track.name.lastIndexOf('.'));
     for (const [state, names] of Object.entries(HERO_ANIMS)) {
       const clip = names.map(n => THREE.AnimationClip.findByName(gltf.animations, n)).find(Boolean);
       if (!clip) continue;
-      const a = mixer.clipAction(clip);
-      if (ONE_SHOT[state]) {
-        a.setLoop(THREE.LoopOnce, 1);
-        a.clampWhenFinished = true;
-        a.timeScale = ONE_SHOT[state];
+      for (const layer of ['upper', 'lower']) {
+        const part = new THREE.AnimationClip(`${clip.name}_${layer}`, clip.duration,
+          clip.tracks.filter(tr => UPPER_BONES.test(boneOf(tr)) === (layer === 'upper')));
+        const a = mixer.clipAction(part);
+        if (ONE_SHOT[state]) {
+          a.setLoop(THREE.LoopOnce, 1);
+          a.clampWhenFinished = true;
+          a.timeScale = ONE_SHOT[state];
+        }
+        actions[layer][state] = a;
       }
-      actions[state] = a;
     }
-    if (!actions.idle) { console.warn('주인공 모델에 대기 애니메이션이 없어 기본 모델을 씁니다'); return; }
+    if (!actions.upper.idle) { console.warn('주인공 모델에 대기 애니메이션이 없어 기본 모델을 씁니다'); return; }
     R.hero.visible = false;
-    R.heroModel = { holder, mixer, actions, mats, state: null, lockUntil: 0, t: 0, yaw: 0, lastAttackT: 0 };
-    play('idle');
+    R.heroModel = {
+      holder, mixer, actions, mats,
+      layers: { upper: { state: null }, lower: { state: null } },
+      attack: 'slice', lockUntil: 0, t: 0, yaw: 0, lastAttackT: 0,
+    };
+    playLayer('upper', 'idle');
+    playLayer('lower', 'idle');
   }
 
-  function play(state) {
+  // 한 층(상체/하체)의 동작을 바꾼다. restart면 같은 동작이라도 처음부터 다시 재생
+  function playLayer(layer, state, restart = false) {
     const H = R.heroModel;
-    const next = H.actions[state] || H.actions.idle;
-    const cur = H.state && (H.actions[H.state] || H.actions.idle);
-    H.state = state;
-    if (next === cur) return;
+    const L = H.layers[layer], acts = H.actions[layer];
+    const next = acts[state] || acts.idle;
+    const cur = L.state && (acts[L.state] || acts.idle);
+    L.state = state;
+    if (next === cur) {
+      if (restart) next.reset().play();
+      return;
+    }
     next.reset().play();
-    if (cur) next.crossFadeFrom(cur, 0.15, false);
-    if (ONE_SHOT[state]) H.lockUntil = H.t + next.getClip().duration / next.timeScale * 0.85;
+    if (cur) next.crossFadeFrom(cur, 0.12, false);
   }
 
   function animateHeroModel(G, dt) {
@@ -922,14 +940,30 @@ const Render3D = (() => {
     const p = G ? G.p : { x: 0, y: 0, fx: 0, fy: 1, moving: false, attackT: 0, invuln: 0 };
     const running = !G || G.state === 'play';
     H.t += dt;
-    let want;
-    if (G && G.state === 'over') want = p.hp <= 0 ? 'death' : 'cheer';
-    else if (p.moving && running) want = 'run';
-    else if (p.attackT > H.lastAttackT + 0.01 && running) want = p.attackKind === 'spin' ? 'spin' : 'slice'; // 새 공격이 시작됨
-    else if (H.t < H.lockUntil && ONE_SHOT[H.state]) want = H.state; // 공격 동작이 끝날 때까지 유지
-    else want = 'idle';
+    const over = G && G.state === 'over';
+    const moving = p.moving && running;
+    // 무기를 쏘면 새 공격이 시작된다. 휘두르는 도중에는 끝날 때까지 기다린다
+    let newAttack = false;
+    if (!over && running && p.attackT > H.lastAttackT + 0.01 && H.t >= H.lockUntil) {
+      H.attack = p.attackKind === 'spin' ? 'spin' : 'slice';
+      const a = H.actions.upper[H.attack];
+      if (a) {
+        H.lockUntil = H.t + a.getClip().duration / a.timeScale * 0.85;
+        newAttack = true;
+      }
+    }
     H.lastAttackT = p.attackT;
-    if (want !== H.state || (ONE_SHOT[want] && want !== 'death' && want !== 'cheer' && H.t >= H.lockUntil)) play(want);
+    const attacking = H.t < H.lockUntil;
+    let upper, lower;
+    if (over) upper = lower = p.hp <= 0 ? 'death' : 'cheer';
+    else {
+      // 상체: 공격 중이면 칼질, 아니면 하체에 맞춰 달리기·대기
+      upper = attacking ? H.attack : moving ? 'run' : 'idle';
+      // 하체: 움직이면 달리기, 멈춰서 공격하면 공격 자세의 다리, 아니면 대기
+      lower = moving ? 'run' : attacking ? H.attack : 'idle';
+    }
+    playLayer('upper', upper, newAttack);
+    playLayer('lower', lower, newAttack && !moving);
     H.mixer.update(G && G.state !== 'play' && G.state !== 'over' ? 0 : dt);
 
     H.holder.position.set(p.x, 0, p.y);
