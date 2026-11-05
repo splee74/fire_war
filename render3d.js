@@ -1082,7 +1082,7 @@ const Render3D = (() => {
     finish(R.gem);
   }
 
-  // useSprites: pixelfx가 불화살·쇠뇌·수리검을 그리면 여기서는 단검과 탄막만 그린다
+  // useSprites: pixelfx가 불화살·쇠뇌·비검을 그리면 여기서는 단검과 탄막만 그린다
   function drawProjectiles(G, t, useSprites) {
     for (const k in R.proj) R.proj[k].count = 0;
     for (const pr of G.projs) {
@@ -1098,7 +1098,7 @@ const Render3D = (() => {
     }
     for (const k in R.proj) finish(R.proj[k]);
 
-    // 회전 수리검
+    // 회전 비검
     R.star.count = 0;
     if (G.weapons.hammer && !useSprites) {
       const s = wstats('hammer');

@@ -312,7 +312,7 @@
       <section class="panel" style="font-size:13px;color:var(--muted);line-height:1.6">
         <h2>도움말</h2>
         장착한 무기는 출정할 때 해당 무기로 시작해요. 등급이 높을수록 시작 레벨이, 강화할수록 피해가 올라가요.<br>
-        🗡️→투척 단검 · 🏹→화염 활 · ⚔️→초승달 베기 · 🪓→회전 수리검 · 🔱→관통 쇠뇌 · 🛡️→최대 체력<br>
+        🗡️→투척 단검 · 🏹→화염 활 · ⚔️→초승달 베기 · 🪓→회전 비검 · 🔱→관통 쇠뇌 · 🛡️→최대 체력<br>
         💠 마정석은 +5 이상 강화가 실패했을 때 파괴를 막아 줘요.
         <div style="margin-top:10px"><button class="btn-small" id="resetBtn">대장간 초기화</button></div>
       </section>
@@ -421,7 +421,7 @@ function buildTints() {
 const IMG_NAMES = [
   'enemy_bat', 'enemy_skull', 'enemy_slime', 'enemy_golem', 'enemy_elite', 'chest',
   'proj_dagger', 'proj_trident', 'spin_hammer', 'fx_burst',
-  'icon_dagger', 'icon_hammer', 'icon_aura', 'icon_trident',
+  'icon_dagger', 'icon_hammer', 'icon_flysword', 'icon_aura', 'icon_trident',
   'icon_boots', 'icon_armor', 'icon_magnet', 'icon_clover', 'icon_wing', 'icon_potion', 'icon_heal',
   'hero_idle', 'hero_walk', 'hero_attack', 'hero_back', 'proj_fire',
   'icon_lightning', 'icon_ice', 'icon_vortex', 'icon_slash',
@@ -699,7 +699,7 @@ const WEAPONS = {
     stats: lv => ({ dmg: grow(8, lv), cd: Math.max(0.3, 1.0 - lv * 0.08), count: 1 + Math.floor(lv / 3) }),
   },
   hammer: {
-    name: '회전 수리검', img: 'icon_hammer', max: 8, intro: '수리검이 주위를 돌며 적을 베어요',
+    name: '회전 비검', img: 'icon_flysword', max: 8, intro: '빛나는 검들이 주위를 날아다니며 적을 베어요',
     stats: lv => ({ dmg: grow(7, lv), count: 1 + Math.floor(lv / 2), radius: 65 + lv * 6 }),
   },
   bow: {
@@ -1462,7 +1462,7 @@ function updateWeapons(dt) {
 
   if (G.weapons.hammer) {
     const s = wstats('hammer');
-    wt.hammerAngle += dt * 3.2;
+    wt.hammerAngle += dt * 4.0; // 회전 속도 (예전 3.2)
     for (let i = 0; i < s.count; i++) {
       const a = wt.hammerAngle + i * Math.PI * 2 / s.count;
       const hx = p.x + Math.cos(a) * s.radius;
@@ -1975,7 +1975,7 @@ function draw() {
     ctx.restore();
   }
 
-  // 회전 수리검 (pixelfx가 없을 때)
+  // 회전 비검 (pixelfx가 없을 때)
   if (G.weapons.hammer && !FXP.ready) {
     const s = wstats('hammer');
     for (let i = 0; i < s.count; i++) {
