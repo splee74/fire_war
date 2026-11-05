@@ -19,7 +19,7 @@ from PIL import Image
 
 # 게임 안 이름: (pixelfx id, 시작 프레임, 끝 프레임(포함 안 함, None이면 끝까지))
 EFFECTS = {
-    'shuriken':  ('projectiles/energy-disc', 0, None),
+    'shuriken':  ('projectiles/orbit-sword', 0, None),    # 새로 만든 이펙트 (tools/fx-src/orbit-sword.js)
     'fireball':  ('fire/fireball', 0, None),
     'arrow':     ('projectiles/arrow', 0, None),
     'lightning': ('lightning/lightning-strike', 10, 31),  # 번개가 내리꽂히는 구간만

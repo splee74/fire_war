@@ -807,7 +807,8 @@ function collectSprites() {
     for (let i = 0; i < s.count; i++) {
       const a = G.wt.hammerAngle + i * Math.PI * 2 / s.count;
       out.push({ key: 'shuriken', f: FXP.frameAt('shuriken', G.time + i * 0.1),
-        x: p.x + Math.cos(a) * s.radius, y: p.y + Math.sin(a) * s.radius, h: 28, s: 0.85, rot: a + Math.PI / 2, a: 1 });
+        // 검은 칼끝이 도는 방향(접선)을 향하고, 빛 꼬리가 뒤로 흐른다
+        x: p.x + Math.cos(a) * s.radius, y: p.y + Math.sin(a) * s.radius, h: 28, s: 1.15, rot: a + Math.PI / 2, a: 1 });
     }
   }
   for (const f of G.pfx) {
@@ -1466,11 +1467,11 @@ function updateWeapons(dt) {
       const a = wt.hammerAngle + i * Math.PI * 2 / s.count;
       const hx = p.x + Math.cos(a) * s.radius;
       const hy = p.y + Math.sin(a) * s.radius;
-      queryEnemies(hx, hy, 40, near);
+      queryEnemies(hx, hy, 44, near);
       for (const e of near) {
         if (G.time < e.hammerCd) continue;
         const d = Math.hypot(e.x - hx, e.y - hy);
-        if (d < 16 + e.r) {
+        if (d < 20 + e.r) { // 검이 커진 만큼 맞는 범위도 조금 넓힘
           e.hammerCd = G.time + 0.35;
           damageEnemy(e, s.dmg, (e.x - p.x) / (d || 1), (e.y - p.y) / (d || 1));
         }
