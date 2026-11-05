@@ -30,6 +30,18 @@
 | 몬스터 9종 | 지그재그 유령, 화살 쏘는 해골 궁수, 분열하는 독 슬라임, 돌진 악마 등 |
 | 보스 3종 | 화염룡 이그니스, 공허의 군주 녹스, 차원의 지배자 |
 
+## 사용한 에셋
+- 3D 주인공 모델: [KayKit Character Pack: Adventurers](https://github.com/KayKit-Game-Assets/KayKit-Character-Pack-Adventures-1.0) — Kay Lousberg ([kaylousberg.com](https://www.kaylousberg.com)), CC0
+- 3D 렌더링: [three.js](https://threejs.org) r159, MIT License
+
+### 주인공 모델 바꾸기
+애니메이션이 들어 있는 GLB 파일을 준비한 뒤, 아래 명령으로 `models/hero.js`를 다시 만들면 돼요.
+```
+node tools/make-hero.js 내모델.glb --list                     # 애니메이션 이름 보기
+node tools/make-hero.js 내모델.glb Idle Run Attack Death Cheer   # 쓸 애니메이션만 남기기
+```
+애니메이션 이름은 `render3d.js`의 `HERO_ANIMS`에서 상태(대기·달리기·공격·사망·환호)와 연결해요.
+
 ## 기술
 - HTML · CSS · JavaScript 파일 하나 (`index.html`), 외부 라이브러리 없음
 - Canvas 2D 렌더링, 공간 분할 격자로 수백 마리 적 처리

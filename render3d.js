@@ -557,7 +557,119 @@ const Render3D = (() => {
     R.ground.position.set(Math.round(x / TILE) * TILE, 0, Math.round(y / TILE) * TILE);
   }
 
-  function animateHero(G, t) {
+  // ---------- 주인공 3D 모델 (models/hero.js에 담긴 GLB) ----------
+  // 모델마다 애니메이션 이름이 달라서, 상태별로 후보 이름을 순서대로 찾는다
+  const HERO_ANIMS = {
+    idle:   ['2H_Melee_Idle', 'Idle', 'idle'],
+    run:    ['Running_A', 'Run', 'Running', 'run', 'Walking_A', 'Walk'],
+    slice:  ['2H_Melee_Attack_Slice', 'Attack', 'attack', '1H_Melee_Attack_Slice_Horizontal'],
+    spin:   ['2H_Melee_Attack_Spin', '2H_Melee_Attack_Slice', 'Attack'],
+    death:  ['Death_A', 'Death', 'death'],
+    cheer:  ['Cheer', 'Victory', 'cheer'],
+  };
+  const ONE_SHOT = { slice: 1.6, spin: 1.5, death: 1, cheer: 1 }; // 한 번만 재생 (값은 재생 속도)
+  const HERO_HEIGHT = 125;
+  // 보조 무기·방패는 숨기고 양손검만 들게 한다
+  const HERO_HIDE = /^(1H_Sword|1H_Sword_Offhand|Badge_Shield|Rectangle_Shield|Round_Shield|Spike_Shield)$/;
+
+  function loadHeroModel() {
+    if (!window.HERO_MODEL || !THREE.GLTFLoader) return;
+    const bin = atob(window.HERO_MODEL);
+    const buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    new THREE.GLTFLoader().parse(buf.buffer, '', setupHeroModel, err => console.warn('주인공 모델을 불러오지 못해 기본 모델을 씁니다', err));
+  }
+
+  function setupHeroModel(gltf) {
+    const root = gltf.scene;
+    const mats = [];
+    root.traverse(o => {
+      if (HERO_HIDE.test(o.name)) o.visible = false;
+      if (!o.isMesh) return;
+      o.frustumCulled = false; // 뼈대로 움직이는 모델은 경계 상자가 정확하지 않다
+      o.material = o.material.clone();
+      if (/2H_Sword/.test(o.name) || /2H_Sword/.test(o.parent && o.parent.name)) {
+        // 검은 보랏빛으로 빛나게
+        o.material.color.set('#c9a6ff');
+        o.material.emissive = new THREE.Color('#6a1fff');
+        o.material.emissiveIntensity = 0.8;
+      } else {
+        // 갑옷을 어두운 보랏빛으로 물들인다
+        o.material.color.setRGB(0.6, 0.52, 0.78);
+      }
+      o.material.userData.baseEmissive = o.material.emissive.clone();
+      mats.push(o.material);
+    });
+    const box = new THREE.Box3().setFromObject(root);
+    const h = box.max.y - box.min.y || 1;
+    root.scale.setScalar(HERO_HEIGHT / h);
+    root.position.y = -box.min.y * HERO_HEIGHT / h;
+    const holder = new THREE.Group();
+    holder.add(root);
+    scene.add(holder);
+
+    const mixer = new THREE.AnimationMixer(root);
+    const actions = {};
+    for (const [state, names] of Object.entries(HERO_ANIMS)) {
+      const clip = names.map(n => THREE.AnimationClip.findByName(gltf.animations, n)).find(Boolean);
+      if (!clip) continue;
+      const a = mixer.clipAction(clip);
+      if (ONE_SHOT[state]) {
+        a.setLoop(THREE.LoopOnce, 1);
+        a.clampWhenFinished = true;
+        a.timeScale = ONE_SHOT[state];
+      }
+      actions[state] = a;
+    }
+    if (!actions.idle) { console.warn('주인공 모델에 대기 애니메이션이 없어 기본 모델을 씁니다'); return; }
+    R.hero.visible = false;
+    R.heroModel = { holder, mixer, actions, mats, state: null, lockUntil: 0, t: 0, yaw: 0, lastAttackT: 0 };
+    play('idle');
+  }
+
+  function play(state) {
+    const H = R.heroModel;
+    const next = H.actions[state] || H.actions.idle;
+    const cur = H.state && (H.actions[H.state] || H.actions.idle);
+    H.state = state;
+    if (next === cur) return;
+    next.reset().play();
+    if (cur) next.crossFadeFrom(cur, 0.15, false);
+    if (ONE_SHOT[state]) H.lockUntil = H.t + next.getClip().duration / next.timeScale * 0.85;
+  }
+
+  function animateHeroModel(G, dt) {
+    const H = R.heroModel;
+    const p = G ? G.p : { x: 0, y: 0, fx: 0, fy: 1, moving: false, attackT: 0, invuln: 0 };
+    const running = !G || G.state === 'play';
+    H.t += dt;
+    let want;
+    if (G && G.state === 'over') want = p.hp <= 0 ? 'death' : 'cheer';
+    else if (p.moving && running) want = 'run';
+    else if (p.attackT > H.lastAttackT + 0.01 && running) want = p.attackKind === 'spin' ? 'spin' : 'slice'; // 새 공격이 시작됨
+    else if (H.t < H.lockUntil && ONE_SHOT[H.state]) want = H.state; // 공격 동작이 끝날 때까지 유지
+    else want = 'idle';
+    H.lastAttackT = p.attackT;
+    if (want !== H.state || (ONE_SHOT[want] && want !== 'death' && want !== 'cheer' && H.t >= H.lockUntil)) play(want);
+    H.mixer.update(G && G.state !== 'play' && G.state !== 'over' ? 0 : dt);
+
+    H.holder.position.set(p.x, 0, p.y);
+    // 바라보는 방향을 부드럽게 돌린다
+    const target = Math.atan2(p.fx, p.fy);
+    let d = target - H.yaw;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    H.yaw += d * Math.min(1, dt * 14);
+    H.holder.rotation.y = H.yaw;
+    const hurt = p.invuln > 0 && Math.floor((G ? G.time : 0) * 20) % 2 === 0;
+    for (const m of H.mats) {
+      if (hurt) m.emissive.set('#ff2020');
+      else m.emissive.copy(m.userData.baseEmissive);
+    }
+    put(R.shadow, p.x, 0.5, p.y, 0, 26, 1, 20);
+  }
+
+  function animateHero(G, t, dt) {
+    if (R.heroModel) { animateHeroModel(G, dt); return; }
     const h = R.hero, u = h.userData;
     const p = G ? G.p : { x: 0, y: 0, fx: 0, fy: 1, moving: false, attackT: 0, invuln: 0 };
     const scale = 80;
@@ -732,6 +844,7 @@ const Render3D = (() => {
       return false;
     }
     build();
+    loadHeroModel();
     return true;
   }
 
@@ -745,13 +858,17 @@ const Render3D = (() => {
     camera.updateProjectionMatrix();
   }
 
+  let lastRender = performance.now();
   function render(G, shakeX = 0, shakeY = 0) {
     frame++;
-    const t = G ? G.time : performance.now() / 1000;
+    const now = performance.now();
+    const dt = Math.min(0.05, (now - lastRender) / 1000);
+    lastRender = now;
+    const t = G ? G.time : now / 1000;
     setCamera((G ? G.p.x : 0) + shakeX, (G ? G.p.y : 0) + shakeY);
     R.shadow.count = 0;
     R.glow.count = 0;
-    animateHero(G, t);
+    animateHero(G, t, dt);
     if (G) {
       drawEnemies(G, t);
       drawItems(G, t);

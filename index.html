@@ -322,6 +322,8 @@
 
 <div class="toast" id="toast"></div>
 <script src="lib/three.min.js"></script>
+<script src="lib/GLTFLoader.js"></script>
+<script src="models/hero.js"></script>
 <script src="render3d.js"></script>
 <div class="overlay" id="modalBg">
   <div class="box">
@@ -1312,6 +1314,7 @@ function fire(kind, angle, s) {
   const k = PROJ[kind];
   SFX.play(kind);
   G.p.attackT = 0.2;
+  G.p.attackKind = 'slice';
   G.projs.push({
     kind,
     x: G.p.x, y: G.p.y,
@@ -1443,6 +1446,7 @@ function updateWeapons(dt) {
       wt.slash = s.cd * cdMult();
       SFX.play('slash');
       p.attackT = 0.25;
+      p.attackKind = 'spin';
       const base = Math.atan2(p.fy, p.fx);
       for (let i = 0; i < s.count; i++) {
         const a = base + i * Math.PI;
