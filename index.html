@@ -325,6 +325,7 @@
 <script src="lib/GLTFLoader.js"></script>
 <script src="models/hero.js"></script>
 <script src="fx/fxdata.js"></script>
+<script src="audio/bgm.js"></script>
 <script src="render3d.js"></script>
 <div class="overlay" id="modalBg">
   <div class="box">
@@ -540,8 +541,9 @@ const SFX = (() => {
     master.gain.value = muted ? 0 : 0.5;
     master.connect(ac.destination);
     bgmGain = ac.createGain();
-    bgmGain.gain.value = 0.35;
+    bgmGain.gain.value = 0.6;
     bgmGain.connect(master);
+    BGM.attach(ac, bgmGain); // 배경음악은 audio/bgm.js가 같은 장치로 연주한다
   }
 
   function tone({ freq = 440, to = null, type = 'square', dur = 0.1, vol = 0.1, delay = 0, out = master }) {
@@ -671,37 +673,11 @@ const SFX = (() => {
     }
   }
 
-  // 배경음악: 4마디 코드 진행(Am-F-C-G) 위에 베이스와 아르페지오
-  const STEP = 60 / 140 / 2;
-  const CHORDS = [
-    { bass: 110.0, tones: [220.0, 261.6, 329.6] },
-    { bass: 87.31, tones: [174.6, 220.0, 261.6] },
-    { bass: 130.8, tones: [261.6, 329.6, 392.0] },
-    { bass: 98.00, tones: [196.0, 246.9, 293.7] },
-  ];
-  const LEAD = [0, -1, 1, 2, -1, 1, 0, 2];
-  let bgmOn = false, step = 0, nextT = 0, timer = null;
-  function schedule() {
-    if (!bgmOn || !ac) return;
-    while (nextT < ac.currentTime + 0.15) {
-      const delay = Math.max(0, nextT - ac.currentTime);
-      const chord = CHORDS[Math.floor(step / 8) % 4];
-      if (step % 2 === 0) tone({ freq: chord.bass, type: 'triangle', dur: STEP * 1.8, vol: 0.12, delay, out: bgmGain });
-      const li = LEAD[step % 8];
-      if (li >= 0) tone({ freq: chord.tones[li] * 2, type: 'square', dur: STEP * 0.9, vol: 0.025, delay, out: bgmGain });
-      nextT += STEP;
-      step = (step + 1) % 32;
-    }
-  }
-  function bgm(on) {
+  // 배경음악 켜기/끄기. id는 audio/bgm.js의 곡 이름 (연주 중이면 다음 마디에서 바뀐다)
+  function bgm(on, id) {
     if (!ac) return;
-    if (on && !bgmOn) {
-      bgmOn = true;
-      nextT = ac.currentTime + 0.05;
-      if (!timer) timer = setInterval(schedule, 40);
-    } else if (!on) {
-      bgmOn = false;
-    }
+    if (on) BGM.play(id);
+    else BGM.stop();
   }
 
   function toggleMute() {
@@ -906,6 +882,7 @@ function newGame() {
     bossKills: 0,
     banner: null, // 화면 가운데 큰 경고 문구
     winAt: 0,     // 최종 보스 처치 후 승리할 시각
+    music: 'dnb', // 지금 배경음악 (setMusic으로 바꾼다)
     weapons: {},
     bonus: {},    // 대장간 장비로 받은 무기별 피해 배율
     bonusHp: 0,   // 대장간 방패로 받은 최대 체력
@@ -1070,6 +1047,13 @@ const BOSSES = [
     patterns: ['ring', 'spiral', 'fan', 'dash', 'summon'], ring: 26, final: true },
 ];
 
+// 배경음악 흐름: 시작 5번(dnb) → 보스 3번(boss) → 1번(charge) → 보스 3번 → 2번(neon) → 최종 보스 3번
+const MUSIC_AFTER_BOSS = ['charge', 'neon'];
+function setMusic(id) {
+  G.music = id;
+  if (G.state === 'play' || G.state === 'levelup') SFX.bgm(true, id);
+}
+
 function spawnBoss(B) {
   const scale = 1 + G.time / 90 + Math.pow(G.time / 360, 2);
   const a = Math.random() * Math.PI * 2;
@@ -1089,6 +1073,7 @@ function spawnBoss(B) {
   G.boss = e;
   G.shake = 0.6;
   pfx('bossSpawn', e.x, e.y, { scale: 1.9 });
+  setMusic('boss');
   showBanner(`⚠️ ${B.name} 출현!`, B.final ? '쓰러뜨리면 승리!' : '체력이 절반 아래로 떨어지면 격노해요');
   SFX.play('boss');
 }
@@ -1185,6 +1170,8 @@ function bossDefeated(e) {
   const B = e.boss;
   G.boss = null;
   G.bossKills++;
+  // 5분 보스를 잡으면 1번 곡, 10분 보스를 잡으면 2번 곡 (최종 보스는 승리 음악으로 끝난다)
+  if (!B.final) setMusic(MUSIC_AFTER_BOSS[G.bossKills - 1] || 'charge');
   G.shake = 0.8;
   SFX.play('bossdown');
   if (FXP.ready) {
@@ -2721,9 +2708,10 @@ function startGame() {
   if (document.getElementById('startBtn').disabled) return; // 그림을 아직 불러오는 중
   SFX.init(); // 브라우저는 사용자가 클릭·키 입력을 한 뒤에만 소리를 낼 수 있다
   SFX.play('click');
-  SFX.bgm(true);
+  SFX.bgm(false); // 이전 판의 곡을 끊고 새로 시작
   Forge.hide();
   newGame();
+  SFX.bgm(true, G.music);
   hideOverlays();
 }
 
@@ -2779,7 +2767,7 @@ function togglePause() {
     document.getElementById('pauseScreen').classList.add('show');
   } else if (G.state === 'paused') {
     G.state = 'play';
-    SFX.bgm(true);
+    SFX.bgm(true, G.music);
     document.getElementById('pauseScreen').classList.remove('show');
   }
 }
