@@ -1,0 +1,780 @@
+// ===================== 3D 렌더러 (Three.js 쿼터뷰) =====================
+// 게임 로직은 그대로 두고, 게임 상태 G를 받아 3D로 그리기만 한다.
+// 2D 좌표 (x, y) → 3D 바닥 (x, 0, y). 정사영 카메라라서 가로 1단위 = 화면 1px.
+// 모델은 외부 파일 없이 기본 도형을 이어 붙인 로우폴리로 만든다.
+// (file://로 열면 브라우저가 그림 파일을 WebGL 텍스처로 쓰지 못하게 막으므로, 텍스처도 코드로 그린다)
+const Render3D = (() => {
+  if (typeof THREE === 'undefined') return { ok: false };
+
+  const ELEV = 55 * Math.PI / 180; // 카메라가 바닥을 내려다보는 각도
+  const TILE = 640;                // 바닥 무늬 한 장의 크기
+  const CAP = 450;                 // 종류별 최대 개수
+
+  let renderer, scene, camera, W = 1, H = 1;
+  let frame = 0;
+  const target = new THREE.Vector3();
+
+  // ---------- 도형 조립 도구 ----------
+  const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Euler();
+  const _p = new THREE.Vector3(), _s = new THREE.Vector3(), _c = new THREE.Color();
+  // 기본 도형 하나를 원하는 위치·회전·크기·색으로 만든다
+  function part(geo, color, o = {}) {
+    const g = geo.index ? geo.toNonIndexed() : geo.clone();
+    geo.dispose();
+    _e.set(o.rx || 0, o.ry || 0, o.rz || 0);
+    _m.compose(_p.set(o.x || 0, o.y || 0, o.z || 0), _q.setFromEuler(_e), _s.set(o.sx ?? 1, o.sy ?? 1, o.sz ?? 1));
+    g.applyMatrix4(_m);
+    _c.set(color);
+    const n = g.attributes.position.count, col = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { col[i * 3] = _c.r; col[i * 3 + 1] = _c.g; col[i * 3 + 2] = _c.b; }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    return g;
+  }
+  // 여러 도형을 하나의 모델로 합친다 (인스턴싱으로 한 번에 그리기 위해)
+  function merge(parts) {
+    let n = 0;
+    for (const g of parts) n += g.attributes.position.count;
+    const pos = new Float32Array(n * 3), nor = new Float32Array(n * 3), col = new Float32Array(n * 3);
+    let o = 0;
+    for (const g of parts) {
+      pos.set(g.attributes.position.array, o);
+      nor.set(g.attributes.normal.array, o);
+      col.set(g.attributes.color.array, o);
+      o += g.attributes.position.count * 3;
+      g.dispose();
+    }
+    const m = new THREE.BufferGeometry();
+    m.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    m.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+    m.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    return m;
+  }
+  const Box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+  const Ball = (r, detail = 1) => new THREE.IcosahedronGeometry(r, detail);
+  const Cone = (r, h, seg = 6) => new THREE.ConeGeometry(r, h, seg);
+  const Cyl = (rt, rb, h, seg = 6) => new THREE.CylinderGeometry(rt, rb, h, seg);
+
+  // ---------- 몬스터 모델 (높이 약 1, 발이 y=0, 앞쪽이 +z) ----------
+  function batModel(body, wing, eye, horn) {
+    return merge([
+      part(Ball(0.28), body, { y: 0.55, sy: 0.9 }),
+      part(Ball(0.21), body, { y: 0.86, z: 0.05 }),
+      part(Cone(0.06, 0.22, 4), horn, { x: 0.12, y: 1.05, rz: -0.35 }),
+      part(Cone(0.06, 0.22, 4), horn, { x: -0.12, y: 1.05, rz: 0.35 }),
+      part(Box(0.6, 0.04, 0.32), wing, { x: 0.42, y: 0.66, z: -0.05, rz: 0.35 }),
+      part(Box(0.6, 0.04, 0.32), wing, { x: -0.42, y: 0.66, z: -0.05, rz: -0.35 }),
+      part(Box(0.07, 0.05, 0.03), eye, { x: 0.08, y: 0.9, z: 0.2 }),
+      part(Box(0.07, 0.05, 0.03), eye, { x: -0.08, y: 0.9, z: 0.2 }),
+      part(Cone(0.05, 0.14, 4), '#f4efe6', { x: 0.05, y: 0.74, z: 0.19, rx: Math.PI }),
+      part(Cone(0.05, 0.14, 4), '#f4efe6', { x: -0.05, y: 0.74, z: 0.19, rx: Math.PI }),
+    ]);
+  }
+  function skeletonModel(bone, withBow) {
+    const parts = [
+      part(Ball(0.2), bone, { y: 0.9 }),
+      part(Box(0.17, 0.07, 0.14), bone, { y: 0.73, z: 0.03 }),
+      part(Box(0.06, 0.06, 0.03), '#140c0c', { x: 0.07, y: 0.92, z: 0.18 }),
+      part(Box(0.06, 0.06, 0.03), '#140c0c', { x: -0.07, y: 0.92, z: 0.18 }),
+      part(Cyl(0.15, 0.1, 0.3, 6), bone, { y: 0.5 }),
+      part(Box(0.24, 0.06, 0.12), bone, { y: 0.32 }),
+      part(Box(0.06, 0.32, 0.06), bone, { x: 0.08, y: 0.15 }),
+      part(Box(0.06, 0.32, 0.06), bone, { x: -0.08, y: 0.15 }),
+      part(Box(0.05, 0.32, 0.05), bone, { x: 0.22, y: 0.5, rz: 0.25 }),
+      part(Box(0.05, 0.32, 0.05), bone, { x: -0.22, y: 0.5, rz: -0.25 }),
+    ];
+    if (withBow) {
+      parts.push(part(new THREE.TorusGeometry(0.26, 0.025, 4, 10, Math.PI), '#6b3b1c', { x: 0.3, y: 0.55, z: 0.12, rz: -Math.PI / 2, ry: 0.3 }));
+      parts.push(part(Box(0.01, 0.52, 0.01), '#e8e0c8', { x: 0.3, y: 0.55, z: 0.12 }));
+    }
+    return merge(parts);
+  }
+  function slimeModel(body, dark) {
+    return merge([
+      part(Ball(0.42, 2), body, { y: 0.3, sy: 0.72 }),
+      part(Ball(0.2, 1), body, { y: 0.58, z: -0.04 }),
+      part(Ball(0.2, 1), dark, { y: 0.12, sy: 0.4, sx: 2.1, sz: 2.1 }),
+      part(Ball(0.075, 1), '#ffffff', { x: 0.13, y: 0.42, z: 0.32 }),
+      part(Ball(0.075, 1), '#ffffff', { x: -0.13, y: 0.42, z: 0.32 }),
+      part(Ball(0.04, 0), '#111111', { x: 0.13, y: 0.42, z: 0.39 }),
+      part(Ball(0.04, 0), '#111111', { x: -0.13, y: 0.42, z: 0.39 }),
+    ]);
+  }
+  function golemModel(stone, dark, glow) {
+    return merge([
+      part(Box(0.62, 0.46, 0.42), stone, { y: 0.62 }),
+      part(Box(0.32, 0.26, 0.3), stone, { y: 0.98 }),
+      part(Box(0.07, 0.05, 0.03), glow, { x: 0.08, y: 1.0, z: 0.16 }),
+      part(Box(0.07, 0.05, 0.03), glow, { x: -0.08, y: 1.0, z: 0.16 }),
+      part(Box(0.2, 0.55, 0.22), dark, { x: 0.43, y: 0.56 }),
+      part(Box(0.2, 0.55, 0.22), dark, { x: -0.43, y: 0.56 }),
+      part(Box(0.26, 0.22, 0.26), stone, { x: 0.45, y: 0.22, z: 0.03 }),
+      part(Box(0.26, 0.22, 0.26), stone, { x: -0.45, y: 0.22, z: 0.03 }),
+      part(Box(0.2, 0.34, 0.24), dark, { x: 0.16, y: 0.17 }),
+      part(Box(0.2, 0.34, 0.24), dark, { x: -0.16, y: 0.17 }),
+      part(Box(0.16, 0.12, 0.05), glow, { y: 0.66, z: 0.22 }),
+    ]);
+  }
+  function ghostModel(body) {
+    return merge([
+      part(Cone(0.3, 0.75, 7), body, { y: 0.42, rx: Math.PI }),
+      part(Ball(0.25), body, { y: 0.82 }),
+      part(Box(0.07, 0.09, 0.03), '#0c1830', { x: 0.08, y: 0.85, z: 0.22 }),
+      part(Box(0.07, 0.09, 0.03), '#0c1830', { x: -0.08, y: 0.85, z: 0.22 }),
+      part(Cone(0.07, 0.3, 4), body, { x: 0.28, y: 0.6, rz: 1.2 }),
+      part(Cone(0.07, 0.3, 4), body, { x: -0.28, y: 0.6, rz: -1.2 }),
+    ]);
+  }
+
+  // fly: 공중에 떠 있는 높이(모델 크기 대비), hop: 걸을 때 통통 튀기, squash: 출렁임
+  const ENEMY_MODELS = {
+    enemy_bat:      { geo: () => batModel('#4a2a6e', '#2a1640', '#ff3a3a', '#d8c8ff'), fly: 0.35 },
+    enemy_charger:  { geo: () => batModel('#d0571f', '#7a2a0c', '#ffe14d', '#ffd9a0'), hop: 1 },
+    enemy_ghost:    { geo: () => ghostModel('#bfe9ff'), fly: 0.3, opacity: 0.7 },
+    enemy_skull:    { geo: () => skeletonModel('#eee8d6', false), hop: 1 },
+    enemy_archer:   { geo: () => skeletonModel('#e07055', true), hop: 1 },
+    enemy_slime:    { geo: () => slimeModel('#9b5cff', '#5b2aa8'), squash: true },
+    enemy_poison:   { geo: () => slimeModel('#62d65a', '#2c7a2a'), squash: true },
+    enemy_golem:    { geo: () => golemModel('#8f826f', '#5e5446', '#ffb03a'), hop: 0.4 },
+    enemy_icegolem: { geo: () => golemModel('#9edcff', '#5aa7d6', '#ffffff'), hop: 0.4 },
+  };
+
+  // ---------- 코드로 그리는 텍스처 ----------
+  function canvasTex(size, draw, repeat) {
+    const c = document.createElement('canvas');
+    c.width = c.height = size;
+    draw(c.getContext('2d'), size);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    if (repeat) { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = 4; }
+    return t;
+  }
+  function seeded(seed) {
+    return () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
+  }
+  // 바닥: 짙은 남보라 돌판 + 보랏빛으로 빛나는 균열
+  const groundDraw = (g, S) => {
+    const rnd = seeded(11);
+    g.fillStyle = '#0d0f22';
+    g.fillRect(0, 0, S, S);
+    const n = 10, T = S / n;
+    for (let i = 0; i < n; i++) {
+      for (let j = 0; j < n; j++) {
+        const l = 13 + rnd() * 7;
+        g.fillStyle = `hsl(${232 + rnd() * 20}, 24%, ${l}%)`;
+        g.fillRect(i * T + 3, j * T + 3, T - 6, T - 6);
+        g.fillStyle = `hsla(235, 30%, ${l + 6}%, 0.6)`;
+        g.fillRect(i * T + 3, j * T + 3, T - 6, 4);
+        g.fillStyle = 'rgba(0,0,0,0.35)';
+        g.fillRect(i * T + 3, j * T + T - 7, T - 6, 4);
+        for (let k = 0; k < 6; k++) {
+          g.fillStyle = 'rgba(255,255,255,0.04)';
+          g.fillRect(i * T + rnd() * T, j * T + rnd() * T, 2 + rnd() * 6, 2 + rnd() * 6);
+        }
+      }
+    }
+    g.lineCap = 'round';
+    for (let k = 0; k < 5; k++) {
+      let x = rnd() * S, y = rnd() * S;
+      g.beginPath();
+      g.moveTo(x, y);
+      for (let s = 0; s < 8 + rnd() * 8; s++) { x += (rnd() - 0.5) * 70; y += (rnd() - 0.5) * 70; g.lineTo(x, y); }
+      g.strokeStyle = 'rgba(150,80,255,0.18)'; g.lineWidth = 8; g.stroke();
+      g.strokeStyle = 'rgba(200,150,255,0.55)'; g.lineWidth = 2; g.stroke();
+    }
+  };
+  const glowDraw = (g, S) => {
+    const gr = g.createRadialGradient(S / 2, S / 2, 0, S / 2, S / 2, S / 2);
+    gr.addColorStop(0, 'rgba(255,255,255,1)');
+    gr.addColorStop(0.25, 'rgba(255,255,255,0.55)');
+    gr.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = gr;
+    g.fillRect(0, 0, S, S);
+  };
+  const burstDraw = (g, S) => {
+    const m = S / 2;
+    g.translate(m, m);
+    for (let i = 0; i < 10; i++) {
+      g.rotate(Math.PI * 2 / 10);
+      const gr = g.createLinearGradient(0, 0, m, 0);
+      gr.addColorStop(0, 'rgba(255,240,180,1)');
+      gr.addColorStop(1, 'rgba(255,90,20,0)');
+      g.fillStyle = gr;
+      g.beginPath(); g.moveTo(0, -m * 0.08); g.lineTo(m * (0.7 + (i % 2) * 0.3), 0); g.lineTo(0, m * 0.08); g.fill();
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    glowDraw(g, S);
+  };
+  const vortexDraw = (g, S) => {
+    const m = S / 2;
+    g.translate(m, m);
+    for (let arm = 0; arm < 4; arm++) {
+      g.rotate(Math.PI / 2);
+      g.beginPath();
+      for (let t = 0; t < 1; t += 0.02) {
+        const a = t * 5, r = t * m * 0.95;
+        g.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+      }
+      g.strokeStyle = 'rgba(190,110,255,0.9)'; g.lineWidth = 10; g.stroke();
+      g.strokeStyle = 'rgba(255,230,255,0.9)'; g.lineWidth = 3; g.stroke();
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    const gr = g.createRadialGradient(m, m, 0, m, m, m);
+    gr.addColorStop(0, 'rgba(20,0,40,0.9)');
+    gr.addColorStop(0.3, 'rgba(120,40,220,0.5)');
+    gr.addColorStop(1, 'rgba(120,40,220,0)');
+    g.globalCompositeOperation = 'destination-over';
+    g.fillStyle = gr;
+    g.fillRect(0, 0, S, S);
+  };
+
+  // ---------- 공용 재질 ----------
+  const phong = (o = {}) => new THREE.MeshPhongMaterial({ flatShading: true, shininess: 25, ...o });
+  const additive = (o = {}) => new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, ...o });
+
+  function instanced(geo, mat, cap = CAP) {
+    const m = new THREE.InstancedMesh(geo, mat, cap);
+    m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    // 색을 따로 주지 않는 인스턴스는 원래 색 그대로 보이도록 전부 흰색(곱하기 1)으로 채워 둔다
+    const white = new THREE.Color(1, 1, 1);
+    for (let i = 0; i < cap; i++) m.setColorAt(i, white);
+    m.instanceColor.setUsage(THREE.DynamicDrawUsage);
+    m.frustumCulled = false;
+    m.count = 0;
+    scene.add(m);
+    return m;
+  }
+  // 인스턴스 하나를 위치·회전·크기·색으로 채운다
+  const _o = new THREE.Object3D();
+  function put(mesh, x, y, z, ry, sx, sy, sz, color, rx = 0, rz = 0) {
+    const i = mesh.count++;
+    if (i >= mesh.instanceMatrix.count) { mesh.count--; return; }
+    _o.position.set(x, y, z);
+    _o.rotation.set(rx, ry, rz);
+    _o.scale.set(sx, sy, sz);
+    _o.updateMatrix();
+    mesh.setMatrixAt(i, _o.matrix);
+    if (color) mesh.setColorAt(i, color);
+  }
+  function finish(mesh) {
+    mesh.instanceMatrix.needsUpdate = true;
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+  }
+
+  // 화면을 향하는 빛 번짐 (탄막·보석·불덩이 후광)
+  function putGlow(x, y, z, size, color) {
+    const i = R.glow.count++;
+    if (i >= R.glow.instanceMatrix.count) { R.glow.count--; return; }
+    _o.position.set(x, y, z);
+    _o.quaternion.copy(camera.quaternion);
+    _o.scale.set(size, size, size);
+    _o.updateMatrix();
+    R.glow.setMatrixAt(i, _o.matrix);
+    R.glow.setColorAt(i, color);
+    _o.rotation.set(0, 0, 0);
+  }
+
+  // 키로 묶어 재사용하는 개별 오브젝트 풀 (정예·보스·상자·범위 효과)
+  function keyedPool(create) {
+    const live = new Map(), free = [];
+    return {
+      get(key) {
+        let o = live.get(key);
+        if (!o) {
+          o = free.pop() || create();
+          o.visible = true;
+          live.set(key, o);
+        }
+        o.userData.seen = frame;
+        return o;
+      },
+      sweep() {
+        for (const [k, o] of live) {
+          if (o.userData.seen !== frame) { o.visible = false; live.delete(k); free.push(o); }
+        }
+      },
+    };
+  }
+
+  // ---------- 주인공 (부위별로 움직이는 모델) ----------
+  function makeHero() {
+    const g = new THREE.Group();
+    const mats = [];
+    const mat = (c, o) => { const m = phong({ color: c, ...o }); mats.push(m); return m; };
+    const mesh = (geo, m, x = 0, y = 0, z = 0) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); return o; };
+    const armor = mat('#2b2533'), trim = mat('#c9a24a'), skin = mat('#f1c9a5'), hair = mat('#3a2620'), cape = mat('#8a1525');
+    const blade = mat('#9b5cff', { emissive: '#5a1fc8', emissiveIntensity: 0.9 });
+
+    const legs = [];
+    for (const s of [-1, 1]) {
+      const hip = new THREE.Group();
+      hip.position.set(s * 0.09, 0.42, 0);
+      hip.add(mesh(Box(0.13, 0.36, 0.15), armor, 0, -0.18, 0));
+      hip.add(mesh(Box(0.15, 0.09, 0.22), mat('#1a1620'), 0, -0.38, 0.03));
+      g.add(hip);
+      legs.push(hip);
+    }
+    g.add(mesh(Box(0.42, 0.42, 0.25), armor, 0, 0.64, 0));
+    g.add(mesh(Box(0.44, 0.06, 0.27), trim, 0, 0.45, 0));
+    g.add(mesh(Box(0.12, 0.12, 0.02), mat('#b05cff', { emissive: '#7a2bd8' }), 0, 0.7, 0.13));
+    for (const s of [-1, 1]) g.add(mesh(Box(0.16, 0.1, 0.3), trim, s * 0.26, 0.86, 0)); // 어깨 갑옷
+    g.add(mesh(Ball(0.19), skin, 0, 1.02, 0.01));
+    const hairTop = mesh(Ball(0.22), hair, 0, 1.08, -0.03);
+    hairTop.scale.set(1.05, 0.85, 1.05);
+    g.add(hairTop);
+    g.add(mesh(Box(0.36, 0.1, 0.1), hair, 0, 1.13, 0.13));
+    for (const s of [-1, 1]) g.add(mesh(Box(0.05, 0.035, 0.02), mat('#b47cff', { emissive: '#8a4cff' }), s * 0.07, 1.0, 0.19));
+
+    const capePivot = new THREE.Group();
+    capePivot.position.set(0, 0.86, -0.13);
+    const capeMesh = mesh(Box(0.46, 0.66, 0.03), cape, 0, -0.33, 0);
+    capePivot.add(capeMesh);
+    g.add(capePivot);
+
+    const arms = [];
+    for (const s of [-1, 1]) {
+      const sh = new THREE.Group();
+      sh.position.set(s * 0.27, 0.8, 0);
+      sh.add(mesh(Box(0.11, 0.36, 0.12), armor, 0, -0.18, 0));
+      if (s === 1) {
+        // 오른손의 큰 보라색 검
+        const hand = new THREE.Group();
+        hand.position.set(0, -0.36, 0.04);
+        hand.add(mesh(Box(0.05, 0.16, 0.05), mat('#4a3020'), 0, 0, 0));
+        hand.add(mesh(Box(0.24, 0.04, 0.07), trim, 0, 0.08, 0));
+        hand.add(mesh(Box(0.08, 0.8, 0.025), blade, 0, 0.5, 0));
+        hand.rotation.x = Math.PI / 2.2;
+        sh.add(hand);
+      }
+      g.add(sh);
+      arms.push(sh);
+    }
+    g.userData = { legs, arms, capePivot, mats };
+    return g;
+  }
+
+  // ---------- 드래곤 (정예·보스) ----------
+  const DRAGONS = {
+    enemy_elite: { body: '#3b2357', belly: '#7a4ea0', wing: '#24133a', eye: '#ff4040', glow: 0.3 },
+    boss_fire:   { body: '#a8321a', belly: '#ff9a3c', wing: '#5a1408', eye: '#ffd23f', glow: 0.5 },
+    boss_void:   { body: '#22123e', belly: '#5a2a9a', wing: '#0d0618', eye: '#d07bff', glow: 0.7 },
+    boss_final:  { body: '#1d5f7a', belly: '#7ae3ff', wing: '#0b2a3a', eye: '#ffffff', glow: 0.8 },
+  };
+  function makeDragon(c) {
+    const g = new THREE.Group();
+    const mats = [];
+    const mat = (col, o) => { const m = phong({ color: col, ...o }); mats.push(m); return m; };
+    const mesh = (geo, m, x = 0, y = 0, z = 0) => { const o = new THREE.Mesh(geo, m); o.position.set(x, y, z); return o; };
+    const body = mat(c.body), belly = mat(c.belly), wingM = mat(c.wing, { side: THREE.DoubleSide });
+    const eye = mat(c.eye, { emissive: c.eye, emissiveIntensity: 1 });
+    const torso = mesh(Ball(0.38, 1), body, 0, 0.5, 0);
+    torso.scale.set(1.0, 0.9, 1.35);
+    g.add(torso);
+    const bellyM = mesh(Ball(0.3, 1), belly, 0, 0.42, 0.12);
+    bellyM.scale.set(0.9, 0.8, 1.2);
+    g.add(bellyM);
+    const neck = mesh(Cyl(0.13, 0.2, 0.4, 6), body, 0, 0.78, 0.36);
+    neck.rotation.x = 0.7;
+    g.add(neck);
+    const head = new THREE.Group();
+    head.position.set(0, 0.98, 0.52);
+    head.add(mesh(Box(0.3, 0.22, 0.36), body, 0, 0, 0));
+    head.add(mesh(Box(0.24, 0.08, 0.28), belly, 0, -0.1, 0.06));
+    for (const s of [-1, 1]) {
+      head.add(mesh(Box(0.06, 0.05, 0.03), eye, s * 0.1, 0.04, 0.18));
+      const horn = mesh(Cone(0.05, 0.3, 4), belly, s * 0.1, 0.2, -0.12);
+      horn.rotation.x = -0.6;
+      head.add(horn);
+    }
+    g.add(head);
+    const wings = [];
+    for (const s of [-1, 1]) {
+      const pivot = new THREE.Group();
+      pivot.position.set(s * 0.25, 0.75, -0.05);
+      const w = mesh(Box(0.95, 0.03, 0.6), wingM, s * 0.48, 0, -0.1);
+      pivot.add(w);
+      const spike = mesh(Cone(0.04, 0.25, 4), belly, s * 0.95, 0.02, 0.18);
+      spike.rotation.z = -s * Math.PI / 2;
+      pivot.add(spike);
+      g.add(pivot);
+      wings.push(pivot);
+    }
+    const tail = mesh(Cone(0.16, 0.8, 6), body, 0, 0.42, -0.72);
+    tail.rotation.x = -Math.PI / 2 - 0.25;
+    g.add(tail);
+    for (const s of [-1, 1]) for (const z of [-0.25, 0.25]) g.add(mesh(Box(0.12, 0.3, 0.14), body, s * 0.22, 0.15, z));
+    g.userData = { wings, head, mats, glow: c.glow };
+    scene.add(g);
+    return g;
+  }
+
+  function makeChest() {
+    const g = new THREE.Group();
+    const wood = phong({ color: '#8a5326' }), gold = phong({ color: '#f2c14e', emissive: '#7a5a10' });
+    const base = new THREE.Mesh(Box(0.9, 0.5, 0.6), wood); base.position.y = 0.25; g.add(base);
+    const lid = new THREE.Mesh(Cyl(0.3, 0.3, 0.9, 8, 1), wood); lid.rotation.z = Math.PI / 2; lid.scale.set(1, 1, 1); lid.position.y = 0.5; g.add(lid);
+    for (const x of [-0.3, 0.3]) { const b = new THREE.Mesh(Box(0.08, 0.86, 0.64), gold); b.position.set(x, 0.42, 0); g.add(b); }
+    const lock = new THREE.Mesh(Box(0.14, 0.16, 0.05), gold); lock.position.set(0, 0.45, 0.31); g.add(lock);
+    scene.add(g);
+    return g;
+  }
+
+  // ---------- 장면 구성 ----------
+  const R = {};
+  function build() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color('#05060f');
+    camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 6000);
+    scene.add(new THREE.HemisphereLight('#c7ccff', '#2a1830', 2.2));
+    const sun = new THREE.DirectionalLight('#ffffff', 2.6);
+    sun.position.set(-0.5, 1, 0.7);
+    scene.add(sun);
+    scene.add(sun.target);
+    R.sun = sun;
+
+    // 바닥은 주인공을 따라다니고, 무늬 한 장 크기 단위로만 움직여 이음매가 보이지 않는다
+    const gtex = canvasTex(1280, groundDraw, true);
+    const GS = 6000;
+    gtex.repeat.set(GS / TILE, GS / TILE);
+    R.ground = new THREE.Mesh(new THREE.PlaneGeometry(GS, GS), new THREE.MeshLambertMaterial({ map: gtex }));
+    R.ground.rotation.x = -Math.PI / 2;
+    scene.add(R.ground);
+
+    const shadowGeo = new THREE.CircleGeometry(1, 16);
+    shadowGeo.rotateX(-Math.PI / 2);
+    R.shadow = instanced(shadowGeo, new THREE.MeshBasicMaterial({ color: '#000000', transparent: true, opacity: 0.4, depthWrite: false }), 900);
+
+    R.enemies = {};
+    for (const [k, def] of Object.entries(ENEMY_MODELS)) {
+      const opts = { vertexColors: true };
+      if (def.opacity) Object.assign(opts, { transparent: true, opacity: def.opacity, depthWrite: false });
+      R.enemies[k] = instanced(def.geo(), phong(opts));
+    }
+
+    R.gem = instanced(new THREE.OctahedronGeometry(1, 0), new THREE.MeshBasicMaterial(), 420);
+    R.glowTex = canvasTex(64, glowDraw);
+    const glowGeo = new THREE.PlaneGeometry(1, 1);
+    R.glow = instanced(glowGeo, additive({ map: R.glowTex }), 1600);
+    R.glow.renderOrder = 5;
+
+    // 투사체 (모두 +x 방향을 향하게 만든다)
+    R.proj = {
+      dagger: instanced(merge([
+        part(Box(1, 0.14, 0.05), '#dfe6ee', { x: 0.2 }),
+        part(Cone(0.07, 0.25, 4), '#ffffff', { x: 0.82, rz: -Math.PI / 2 }),
+        part(Box(0.12, 0.4, 0.08), '#c9a24a', { x: -0.32 }),
+        part(Box(0.3, 0.1, 0.08), '#6b3b1c', { x: -0.52 }),
+      ]), phong({ vertexColors: true, emissive: '#333333' }), 300),
+      trident: instanced(merge([
+        part(Cyl(0.05, 0.05, 1.4, 5), '#c9a24a', { rz: Math.PI / 2 }),
+        part(Cone(0.12, 0.35, 4), '#e8f6ff', { x: 0.85, rz: -Math.PI / 2 }),
+        part(Box(0.06, 0.34, 0.06), '#c9a24a', { x: 0.6 }),
+      ]), phong({ vertexColors: true, emissive: '#3a2a00' }), 200),
+      bow: instanced(new THREE.IcosahedronGeometry(1, 1), new THREE.MeshBasicMaterial({ color: '#ffd27a' }), 300),
+    };
+    R.star = instanced(merge([
+      part(Cone(0.18, 0.75, 4), '#f2c14e', { x: 0.37, rz: -Math.PI / 2 }),
+      part(Cone(0.18, 0.75, 4), '#f2c14e', { x: -0.37, rz: Math.PI / 2 }),
+      part(Cone(0.18, 0.75, 4), '#f2c14e', { z: 0.37, rx: Math.PI / 2 }),
+      part(Cone(0.18, 0.75, 4), '#f2c14e', { z: -0.37, rx: -Math.PI / 2 }),
+      part(Cyl(0.16, 0.16, 0.12, 8), '#7a4a10'),
+    ]), phong({ vertexColors: true, emissive: '#5a3a00' }), 16);
+    R.bullet = instanced(new THREE.IcosahedronGeometry(1, 1), new THREE.MeshBasicMaterial(), 620);
+
+    // 정예·보스·상자·범위 효과는 개수가 적어 개별 오브젝트로 그린다
+    R.hero = makeHero();
+    scene.add(R.hero);
+    R.dragons = {};
+    for (const [k, c] of Object.entries(DRAGONS)) R.dragons[k] = keyedPool(() => makeDragon(c));
+    R.chests = keyedPool(makeChest);
+
+    const burstTex = canvasTex(128, burstDraw);
+    R.bursts = keyedPool(() => {
+      const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: burstTex, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+      scene.add(s);
+      return s;
+    });
+    R.bolts = keyedPool(() => {
+      const g = new THREE.Group();
+      // 기둥이 바닥에서 위로 솟도록 아랫면을 원점에 맞춘다
+      const beam = new THREE.Mesh(Cyl(5, 9, 1, 6).translate(0, 0.5, 0), additive({ color: '#bfe6ff' }));
+      g.add(beam);
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.4, 1, 24), additive({ color: '#7fc8ff', side: THREE.DoubleSide }));
+      ring.rotation.x = -Math.PI / 2;
+      ring.position.y = 0.01;
+      g.add(ring);
+      g.userData = { beam, ring };
+      scene.add(g);
+      return g;
+    });
+    R.novas = keyedPool(() => {
+      const g = new THREE.Group();
+      const ring = new THREE.Mesh(new THREE.RingGeometry(0.86, 1, 48), additive({ color: '#a8e0ff', side: THREE.DoubleSide }));
+      const disk = new THREE.Mesh(new THREE.CircleGeometry(0.86, 48), additive({ color: '#3a7ab8', side: THREE.DoubleSide }));
+      for (const m of [ring, disk]) { m.rotation.x = -Math.PI / 2; g.add(m); }
+      g.position.y = 2;
+      g.userData = { ring, disk };
+      scene.add(g);
+      return g;
+    });
+    const vortexTex = canvasTex(256, vortexDraw);
+    R.vortexes = keyedPool(() => {
+      const m = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), additive({ map: vortexTex, side: THREE.DoubleSide }));
+      m.rotation.x = -Math.PI / 2;
+      const g = new THREE.Group();
+      g.add(m);
+      g.position.y = 3;
+      g.userData = { m };
+      scene.add(g);
+      return g;
+    });
+    R.slashes = keyedPool(() => {
+      const g = new THREE.Group();
+      const m = new THREE.Mesh(new THREE.RingGeometry(0.55, 1, 32, 1, -1.2, 2.4), additive({ color: '#ffb8f0', side: THREE.DoubleSide }));
+      m.rotation.x = -Math.PI / 2;
+      g.add(m);
+      g.position.y = 18;
+      g.userData = { m };
+      scene.add(g);
+      return g;
+    });
+  }
+
+  // ---------- 매 프레임 ----------
+  const WHITE = new THREE.Color(1, 1, 1), FLASH = new THREE.Color(2.4, 2.4, 2.4);
+  const SLOW = new THREE.Color(0.6, 0.85, 1.7), WINDUP = new THREE.Color(2.2, 0.6, 0.5);
+  const GEM_COLORS = { 1: new THREE.Color('#2fa4ff'), 3: new THREE.Color('#b45cff'), 8: new THREE.Color('#ff3d6e') };
+  const STONE = new THREE.Color('#50e6ff'), SCALE = new THREE.Color('#ff7a50');
+  const FIRE = new THREE.Color('#ff8a2a'), GOLD = new THREE.Color('#ffd166');
+  const tmpColor = new THREE.Color();
+
+  function setCamera(x, y) {
+    target.set(x, 0, y);
+    camera.position.set(x, Math.sin(ELEV) * 2500, y + Math.cos(ELEV) * 2500);
+    camera.lookAt(target);
+    camera.updateMatrixWorld();
+    R.sun.position.set(x - 400, 900, y + 600);
+    R.sun.target.position.copy(target);
+    R.ground.position.set(Math.round(x / TILE) * TILE, 0, Math.round(y / TILE) * TILE);
+  }
+
+  function animateHero(G, t) {
+    const h = R.hero, u = h.userData;
+    const p = G ? G.p : { x: 0, y: 0, fx: 0, fy: 1, moving: false, attackT: 0, invuln: 0 };
+    const scale = 80;
+    h.position.set(p.x, 0, p.y);
+    h.scale.setScalar(scale);
+    h.rotation.y = Math.atan2(p.fx, p.fy);
+    const walk = p.moving ? Math.sin(t * 12) : 0;
+    u.legs[0].rotation.x = walk * 0.7;
+    u.legs[1].rotation.x = -walk * 0.7;
+    u.arms[0].rotation.x = -walk * 0.5;
+    // 공격하면 검을 든 팔을 크게 휘두른다
+    u.arms[1].rotation.x = p.attackT > 0 ? -2.4 + (0.25 - Math.min(0.25, p.attackT)) * 10 : walk * 0.5 - 0.3;
+    u.capePivot.rotation.x = 0.15 + (p.moving ? 0.35 + Math.abs(walk) * 0.15 : Math.sin(t * 2) * 0.05);
+    h.position.y = p.moving ? Math.abs(walk) * 3 : Math.sin(t * 3) * 1;
+    const hurt = p.invuln > 0 && Math.floor(t * 20) % 2 === 0;
+    for (const m of u.mats) {
+      if (!m.userData.baseEmissive) m.userData.baseEmissive = m.emissive.clone();
+      if (hurt) m.emissive.set('#ff2020'); else m.emissive.copy(m.userData.baseEmissive);
+    }
+    put(R.shadow, p.x, 0.5, p.y, 0, 26, 1, 20);
+  }
+
+  function drawEnemies(G, t) {
+    const px = G.p.x, py = G.p.y;
+    for (const k in R.enemies) R.enemies[k].count = 0;
+    for (const e of G.enemies) {
+      if (e.dead) continue;
+      const face = Math.atan2(px - e.x, py - e.y);
+      if (e.elite) {
+        // 정예와 보스는 날개를 퍼덕이는 드래곤
+        const pool = R.dragons[e.img] || R.dragons.enemy_elite;
+        const d = pool.get(e);
+        const s = e.r * 2.6;
+        d.position.set(e.x, 0, e.y);
+        d.scale.setScalar(s);
+        d.rotation.y = e.st === 'dash' ? Math.atan2(e.dx || 0, e.dy || 1) : face;
+        const flap = Math.sin(t * (e.enraged ? 10 : 6) + e.phase);
+        d.userData.wings[0].rotation.z = 0.35 + flap * 0.55;
+        d.userData.wings[1].rotation.z = -0.35 - flap * 0.55;
+        d.userData.head.rotation.x = Math.sin(t * 3) * 0.1;
+        d.position.y = 6 + flap * 3;
+        const glowCol = e.flash > 0 ? (e.st === 'windup' ? '#ff2a10' : '#ffffff') : e.enraged ? '#ff2020' : null;
+        for (const m of d.userData.mats) {
+          if (!m.userData.baseEmissive) m.userData.baseEmissive = m.emissive.clone();
+          if (glowCol) m.emissive.set(glowCol).multiplyScalar(e.flash > 0 ? 0.8 : 0.35);
+          else m.emissive.copy(m.userData.baseEmissive);
+        }
+        put(R.shadow, e.x, 0.5, e.y, 0, e.r * 1.4, 1, e.r * 1.1);
+        continue;
+      }
+      const def = ENEMY_MODELS[e.img];
+      const mesh = R.enemies[e.img];
+      if (!def || !mesh) continue;
+      const s = e.r * 3.1;
+      let sx = s, sy = s, y = 0;
+      const ph = t * 10 + e.phase;
+      if (def.fly) y = s * def.fly + Math.sin(ph) * 4;
+      if (def.hop) y = Math.abs(Math.sin(ph)) * 3 * def.hop;
+      if (def.squash) { const q = Math.sin(t * 7 + e.phase) * 0.12; sy = s * (1 + q); sx = s * (1 - q * 0.5); }
+      let col = WHITE;
+      if (e.flash > 0) col = e.ai === 'dash' && !(e.dashT > 0) ? WINDUP : FLASH;
+      else if (e.slowT > 0) col = SLOW;
+      const tilt = e.dashT > 0 ? -0.4 : 0;
+      put(mesh, e.x, y, e.y, face, sx, sy, sx, col, tilt);
+      put(R.shadow, e.x, 0.5, e.y, 0, e.r * 0.9, 1, e.r * 0.7);
+    }
+    for (const k in R.enemies) finish(R.enemies[k]);
+  }
+
+  function drawItems(G, t) {
+    R.gem.count = 0;
+    for (const g of G.gems) {
+      if (g.chest) {
+        const c = R.chests.get(g);
+        c.position.set(g.x, 4 + Math.sin(t * 4) * 3, g.y);
+        c.scale.setScalar(34);
+        c.rotation.y = Math.sin(t * 1.5) * 0.4;
+        putGlow(g.x, 18, g.y, 110 + Math.sin(t * 5) * 15, GOLD);
+        continue;
+      }
+      const loot = g.loot;
+      const col = loot === 'scales' ? SCALE : loot === 'stones' ? STONE : g.v >= 8 ? GEM_COLORS[8] : g.v >= 3 ? GEM_COLORS[3] : GEM_COLORS[1];
+      const size = loot ? 11 : 7;
+      const y = 14 + Math.sin(t * 5 + g.x * 0.05) * 3;
+      put(R.gem, g.x, y, g.y, t * 2 + g.x, size * 0.8, size * 1.3, size * 0.8, col);
+      putGlow(g.x, y, g.y, size * (loot ? 7 : 5), col);
+    }
+    finish(R.gem);
+  }
+
+  function drawProjectiles(G, t) {
+    for (const k in R.proj) R.proj[k].count = 0;
+    for (const pr of G.projs) {
+      const m = R.proj[pr.kind];
+      if (!m) continue;
+      if (pr.kind === 'bow') {
+        put(m, pr.x, 26, pr.y, 0, 8, 8, 8);
+        putGlow(pr.x, 26, pr.y, 46, FIRE);
+      } else {
+        const s = pr.kind === 'dagger' ? 30 : 42;
+        put(m, pr.x, 26, pr.y, -pr.angle, s, s, s);
+      }
+    }
+    for (const k in R.proj) finish(R.proj[k]);
+
+    // 회전 수리검
+    R.star.count = 0;
+    if (G.weapons.hammer) {
+      const s = wstats('hammer');
+      for (let i = 0; i < s.count; i++) {
+        const a = G.wt.hammerAngle + i * Math.PI * 2 / s.count;
+        put(R.star, G.p.x + Math.cos(a) * s.radius, 28, G.p.y + Math.sin(a) * s.radius, t * 14, 34, 34, 34);
+      }
+    }
+    finish(R.star);
+
+    // 적의 화살과 보스 탄막
+    R.bullet.count = 0;
+    for (const b of G.eprojs) {
+      tmpColor.set(b.color || '#ff3c3c');
+      const r = b.r || 5;
+      put(R.bullet, b.x, 22, b.y, 0, r * 0.75, r * 0.75, r * 0.75, WHITE);
+      putGlow(b.x, 22, b.y, r * 5, tmpColor);
+    }
+    finish(R.bullet);
+  }
+
+  function drawZones(G, t) {
+    for (const z of G.zones) {
+      const k = z.life / z.max; // 1 → 0
+      if (z.kind === 'bolt') {
+        const g = R.bolts.get(z);
+        g.position.set(z.x, 0, z.y);
+        g.userData.beam.scale.set(k + 0.3, 420, k + 0.3);
+        g.userData.beam.material.opacity = k;
+        g.userData.ring.scale.setScalar(50 + (1 - k) * 40);
+        g.userData.ring.material.opacity = k;
+        putGlow(z.x, 30, z.y, 160 * k, tmpColor.set('#9fd8ff'));
+      } else if (z.kind === 'nova') {
+        const g = R.novas.get(z);
+        g.position.x = z.x; g.position.z = z.y;
+        g.scale.setScalar(z.r * (1.15 - k * 0.75));
+        g.userData.ring.material.opacity = k;
+        g.userData.disk.material.opacity = k * 0.35;
+      } else if (z.kind === 'vortex') {
+        const g = R.vortexes.get(z);
+        g.position.x = z.x; g.position.z = z.y;
+        g.scale.setScalar(z.r * 2.6);
+        g.rotation.y = t * 5;
+        g.userData.m.material.opacity = Math.min(1, z.life / 0.4, (z.max - z.life) / 0.2);
+      } else if (z.kind === 'slash') {
+        const g = R.slashes.get(z);
+        g.position.x = G.p.x; g.position.z = G.p.y;
+        g.rotation.y = -z.a;
+        g.scale.setScalar(z.r * (1.05 - k * 0.15));
+        g.userData.m.material.opacity = Math.min(0.6, k);
+      }
+    }
+    for (const f of G.fx) {
+      const s = R.bursts.get(f);
+      s.position.set(f.x, 24, f.y);
+      s.scale.setScalar(f.size * (1.4 - f.life) * 1.6);
+      s.material.opacity = Math.max(0, Math.min(1, f.life / 0.3));
+    }
+  }
+
+  // ---------- 공개 함수 ----------
+  function init(canvas) {
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    } catch (e) {
+      return false;
+    }
+    build();
+    return true;
+  }
+
+  function resize(w, h, dpr) {
+    if (!renderer) return;
+    W = w; H = h;
+    renderer.setPixelRatio(dpr);
+    renderer.setSize(w, h, false);
+    camera.left = -w / 2; camera.right = w / 2;
+    camera.top = h / 2; camera.bottom = -h / 2;
+    camera.updateProjectionMatrix();
+  }
+
+  function render(G, shakeX = 0, shakeY = 0) {
+    frame++;
+    const t = G ? G.time : performance.now() / 1000;
+    setCamera((G ? G.p.x : 0) + shakeX, (G ? G.p.y : 0) + shakeY);
+    R.shadow.count = 0;
+    R.glow.count = 0;
+    animateHero(G, t);
+    if (G) {
+      drawEnemies(G, t);
+      drawItems(G, t);
+      drawProjectiles(G, t);
+      drawZones(G, t);
+    } else {
+      for (const k in R.enemies) R.enemies[k].count = 0;
+      for (const k in R.proj) R.proj[k].count = 0;
+      R.gem.count = R.star.count = R.bullet.count = 0;
+    }
+    for (const k in R.dragons) R.dragons[k].sweep();
+    for (const pool of [R.chests, R.bursts, R.bolts, R.novas, R.vortexes, R.slashes]) pool.sweep();
+    finish(R.shadow);
+    finish(R.glow);
+    renderer.render(scene, camera);
+  }
+
+  // 월드 좌표 (x, y, 높이) → 화면 좌표. 피해 숫자·체력 바를 3D 위치에 맞춰 그릴 때 쓴다
+  const _proj = new THREE.Vector3();
+  function project(x, y, h = 0) {
+    _proj.set(x, h, y).project(camera);
+    return { x: (_proj.x + 1) / 2 * W, y: (1 - _proj.y) / 2 * H };
+  }
+
+  return { ok: true, init, resize, render, project };
+})();
