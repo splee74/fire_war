@@ -8,6 +8,7 @@ const Render3D = (() => {
 
   const ELEV = 55 * Math.PI / 180; // 카메라가 바닥을 내려다보는 각도
   const TILE = 640;                // 바닥 무늬 한 장의 크기
+  const STAIN = 1700;              // 넓은 얼룩 무늬 한 장의 크기
   const CAP = 450;                 // 종류별 최대 개수
 
   let renderer, scene, camera, W = 1, H = 1;
@@ -125,6 +126,53 @@ const Render3D = (() => {
     ]);
   }
 
+  // ---------- 바닥 장식물 (높이 약 1, 바닥이 y=0) ----------
+  const PROP_MODELS = {
+    rock: () => merge([
+      part(new THREE.IcosahedronGeometry(0.5, 0), '#4a4560', { y: 0.25, sy: 0.6, sx: 1.2 }),
+      part(new THREE.IcosahedronGeometry(0.28, 0), '#5a5472', { x: 0.55, y: 0.14, sy: 0.7, ry: 0.6 }),
+      part(new THREE.IcosahedronGeometry(0.18, 0), '#3c3852', { x: -0.5, y: 0.1, z: 0.3 }),
+    ]),
+    pillar: () => merge([
+      part(Box(0.8, 0.18, 0.8), '#5d5878', { y: 0.09 }),
+      part(Cyl(0.27, 0.3, 1.3, 8), '#6e6a8a', { y: 0.82 }),
+      part(Cyl(0.24, 0.27, 0.35, 8), '#6e6a8a', { y: 1.6, x: 0.05, rz: 0.25 }),
+      part(Box(0.4, 0.25, 0.3), '#5d5878', { x: 0.55, y: 0.12, z: 0.25, ry: 0.7, rz: 0.4 }),
+    ]),
+    bones: () => merge([
+      part(Ball(0.16), '#d8d2c0', { y: 0.15 }),
+      part(Box(0.05, 0.05, 0.14), '#141010', { x: 0.06, y: 0.17, z: 0.12 }),
+      part(Box(0.05, 0.05, 0.14), '#141010', { x: -0.06, y: 0.17, z: 0.12 }),
+      part(Cyl(0.03, 0.03, 0.6, 5), '#cfc8b4', { x: 0.35, y: 0.04, rz: Math.PI / 2, ry: 0.5 }),
+      part(Cyl(0.03, 0.03, 0.5, 5), '#cfc8b4', { x: -0.2, y: 0.04, z: -0.3, rz: Math.PI / 2, ry: -0.8 }),
+      part(Box(0.4, 0.04, 0.06), '#cfc8b4', { x: 0.1, y: 0.03, z: -0.25, ry: 0.2 }),
+    ]),
+    tree: () => merge([
+      part(Cyl(0.08, 0.16, 1.1, 6), '#3a2a2a', { y: 0.55, rz: 0.08 }),
+      part(Cyl(0.03, 0.07, 0.6, 5), '#3a2a2a', { x: 0.22, y: 1.05, rz: -0.9 }),
+      part(Cyl(0.03, 0.06, 0.5, 5), '#3a2a2a', { x: -0.2, y: 0.9, rz: 1.0 }),
+      part(Cyl(0.02, 0.04, 0.4, 5), '#3a2a2a', { x: 0.05, y: 1.3, z: 0.1, rx: 0.6 }),
+      part(Cyl(0.3, 0.35, 0.08, 7), '#2a2030', { y: 0.04 }),
+    ]),
+    crystal: () => merge([
+      part(Cone(0.16, 0.95, 5), '#ffffff', { y: 0.47 }),
+      part(Cone(0.12, 0.65, 5), '#ffffff', { x: 0.22, y: 0.3, rz: -0.45 }),
+      part(Cone(0.1, 0.5, 5), '#ffffff', { x: -0.2, y: 0.24, z: 0.08, rz: 0.5 }),
+      part(Cone(0.08, 0.4, 5), '#ffffff', { x: 0.05, y: 0.18, z: 0.22, rx: 0.5 }),
+      part(new THREE.IcosahedronGeometry(0.22, 0), '#3c3852', { y: 0.05, sy: 0.4 }),
+    ]),
+  };
+  // 장식물 종류별 등장 비중과 크기
+  const PROP_KINDS = [
+    { kind: 'rock', w: 34, size: [30, 55] },
+    { kind: 'crystal', w: 18, size: [45, 75] },
+    { kind: 'pillar', w: 12, size: [55, 80] },
+    { kind: 'rune', w: 12, size: [110, 170] },
+    { kind: 'bones', w: 14, size: [38, 55] },
+    { kind: 'tree', w: 10, size: [70, 100] },
+  ];
+  const CHUNK = 520;
+
   // fly: 공중에 떠 있는 높이(모델 크기 대비), hop: 걸을 때 통통 튀기, squash: 출렁임
   const ENEMY_MODELS = {
     enemy_bat:      { geo: () => batModel('#4a2a6e', '#2a1640', '#ff3a3a', '#d8c8ff'), fly: 0.35 },
@@ -152,15 +200,18 @@ const Render3D = (() => {
     return () => ((seed = (seed * 16807) % 2147483647) / 2147483647);
   }
   // 바닥: 짙은 남보라 돌판 + 보랏빛으로 빛나는 균열
-  const groundDraw = (g, S) => {
+  // mask=true면 같은 무늬에서 균열만 하얗게 그린다 (균열을 빛나게 하는 발광 지도로 쓴다)
+  const groundDraw = (g, S, mask = false) => {
     const rnd = seeded(11);
-    g.fillStyle = '#0d0f22';
+    g.fillStyle = mask ? '#000' : '#0d0f22';
     g.fillRect(0, 0, S, S);
     const n = 10, T = S / n;
     for (let i = 0; i < n; i++) {
       for (let j = 0; j < n; j++) {
-        const l = 13 + rnd() * 7;
-        g.fillStyle = `hsl(${232 + rnd() * 20}, 24%, ${l}%)`;
+        const l = 12 + rnd() * 8;
+        const hue = 228 + rnd() * 26;
+        if (mask) { for (let k = 0; k < 12; k++) rnd(); continue; } // 같은 난수 순서를 유지
+        g.fillStyle = `hsl(${hue}, 22%, ${l}%)`;
         g.fillRect(i * T + 3, j * T + 3, T - 6, T - 6);
         g.fillStyle = `hsla(235, 30%, ${l + 6}%, 0.6)`;
         g.fillRect(i * T + 3, j * T + 3, T - 6, 4);
@@ -173,13 +224,62 @@ const Render3D = (() => {
       }
     }
     g.lineCap = 'round';
-    for (let k = 0; k < 5; k++) {
+    g.lineJoin = 'round';
+    for (let k = 0; k < 9; k++) {
       let x = rnd() * S, y = rnd() * S;
       g.beginPath();
       g.moveTo(x, y);
-      for (let s = 0; s < 8 + rnd() * 8; s++) { x += (rnd() - 0.5) * 70; y += (rnd() - 0.5) * 70; g.lineTo(x, y); }
-      g.strokeStyle = 'rgba(150,80,255,0.18)'; g.lineWidth = 8; g.stroke();
-      g.strokeStyle = 'rgba(200,150,255,0.55)'; g.lineWidth = 2; g.stroke();
+      for (let s = 0; s < 8 + rnd() * 10; s++) { x += (rnd() - 0.5) * 80; y += (rnd() - 0.5) * 80; g.lineTo(x, y); }
+      if (mask) {
+        g.strokeStyle = 'rgba(255,255,255,0.35)'; g.lineWidth = 9; g.stroke();
+        g.strokeStyle = '#fff'; g.lineWidth = 2.5; g.stroke();
+      } else {
+        g.strokeStyle = 'rgba(20,10,40,0.9)'; g.lineWidth = 6; g.stroke();
+        g.strokeStyle = 'rgba(120,90,160,0.5)'; g.lineWidth = 2; g.stroke();
+      }
+    }
+  };
+  // 넓은 얼룩: 바닥 무늬의 반복을 가리려고 훨씬 큰 간격으로 어둡고 색 있는 얼룩을 덮는다
+  const stainDraw = (g, S) => {
+    const rnd = seeded(29);
+    for (let k = 0; k < 26; k++) {
+      const x = rnd() * S, y = rnd() * S, r = 60 + rnd() * 180;
+      const dark = rnd() < 0.65;
+      for (const dx of [-S, 0, S]) for (const dy of [-S, 0, S]) {
+        const gr = g.createRadialGradient(x + dx, y + dy, 0, x + dx, y + dy, r);
+        gr.addColorStop(0, dark ? 'rgba(0,0,10,0.55)' : 'rgba(120,80,200,0.22)');
+        gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr;
+        g.fillRect(x + dx - r, y + dy - r, r * 2, r * 2);
+      }
+    }
+  };
+  // 룬 마법진 무늬
+  const runeDraw = (g, S) => {
+    const m = S / 2;
+    g.strokeStyle = '#fff';
+    g.fillStyle = '#fff';
+    g.lineWidth = 3;
+    for (const r of [0.92, 0.78, 0.42]) { g.beginPath(); g.arc(m, m, m * r, 0, Math.PI * 2); g.stroke(); }
+    g.lineWidth = 2;
+    g.beginPath();
+    for (let i = 0; i <= 6; i++) {
+      const a = (i * 2 / 6) * Math.PI * 2 - Math.PI / 2;
+      const px = m + Math.cos(a) * m * 0.78, py = m + Math.sin(a) * m * 0.78;
+      if (i === 0) g.moveTo(px, py); else g.lineTo(px, py);
+    }
+    g.stroke();
+    g.font = `bold ${S * 0.07}px serif`;
+    g.textAlign = 'center';
+    g.textBaseline = 'middle';
+    const RUNES = 'ᚠᚢᚦᚨᚱᚲᚷᚹᚺᚾᛁᛃᛇᛈᛉᛊ';
+    for (let i = 0; i < 16; i++) {
+      const a = (i / 16) * Math.PI * 2;
+      g.save();
+      g.translate(m + Math.cos(a) * m * 0.85, m + Math.sin(a) * m * 0.85);
+      g.rotate(a + Math.PI / 2);
+      g.fillText(RUNES[i], 0, 0);
+      g.restore();
     }
   };
   const glowDraw = (g, S) => {
@@ -424,7 +524,8 @@ const Render3D = (() => {
     scene = new THREE.Scene();
     scene.background = new THREE.Color('#05060f');
     camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 1, 6000);
-    scene.add(new THREE.HemisphereLight('#c7ccff', '#2a1830', 2.2));
+    R.hemi = new THREE.HemisphereLight('#c7ccff', '#2a1830', 2.2);
+    scene.add(R.hemi);
     const sun = new THREE.DirectionalLight('#ffffff', 2.6);
     sun.position.set(-0.5, 1, 0.7);
     scene.add(sun);
@@ -432,11 +533,39 @@ const Render3D = (() => {
     R.sun = sun;
 
     // 바닥은 주인공을 따라다니고, 무늬 한 장 크기 단위로만 움직여 이음매가 보이지 않는다
+    // 균열은 발광 지도로 따로 그려 단계별 색으로 숨 쉬듯 빛나게 한다
     const gtex = canvasTex(1280, groundDraw, true);
+    const gglow = canvasTex(1280, (g, S) => groundDraw(g, S, true), true);
     const GS = 6000;
     gtex.repeat.set(GS / TILE, GS / TILE);
-    R.ground = new THREE.Mesh(new THREE.PlaneGeometry(GS, GS), new THREE.MeshLambertMaterial({ map: gtex }));
+    gglow.repeat.set(GS / TILE, GS / TILE);
+    R.ground = new THREE.Mesh(new THREE.PlaneGeometry(GS, GS),
+      new THREE.MeshLambertMaterial({ map: gtex, emissiveMap: gglow, emissive: '#8a4dff', emissiveIntensity: 1 }));
     R.ground.rotation.x = -Math.PI / 2;
+
+    // 넓은 얼룩 (바닥 무늬보다 훨씬 큰 간격으로 반복)
+    const stex = canvasTex(512, stainDraw, true);
+    stex.repeat.set(GS / STAIN, GS / STAIN);
+    R.stain = new THREE.Mesh(new THREE.PlaneGeometry(GS, GS), new THREE.MeshBasicMaterial({ map: stex, transparent: true, depthWrite: false }));
+    R.stain.rotation.x = -Math.PI / 2;
+    R.stain.position.y = 0.2;
+    scene.add(R.stain);
+
+    // 바닥 장식물: 종류마다 인스턴싱. 수정은 스스로 빛나고, 룬 마법진은 바닥에서 돌며 깜빡인다
+    R.props = {};
+    for (const [k, make] of Object.entries(PROP_MODELS)) {
+      const mat = k === 'crystal'
+        ? phong({ vertexColors: true, color: '#b48cff', emissive: '#6a2bd8', emissiveIntensity: 0.9, shininess: 80 })
+        : phong({ vertexColors: true });
+      R.props[k] = instanced(make(), mat, 200);
+    }
+    const runeGeo = new THREE.PlaneGeometry(1, 1);
+    runeGeo.rotateX(-Math.PI / 2);
+    R.props.rune = instanced(runeGeo, additive({ map: canvasTex(256, runeDraw), color: '#ffffff' }), 120);
+    R.props.rune.renderOrder = 1;
+    R.propCache = new Map();
+    // 지금 단계의 분위기 색 (목표 색으로 서서히 바뀐다)
+    R.theme = { accent: new THREE.Color('#8a4dff'), sky: new THREE.Color('#c7ccff') };
     scene.add(R.ground);
 
     const shadowGeo = new THREE.CircleGeometry(1, 16);
@@ -611,6 +740,100 @@ const Render3D = (() => {
     R.sun.position.set(x - 400, 900, y + 600);
     R.sun.target.position.copy(target);
     R.ground.position.set(Math.round(x / TILE) * TILE, 0, Math.round(y / TILE) * TILE);
+    R.stain.position.set(Math.round(x / STAIN) * STAIN, 0.2, Math.round(y / STAIN) * STAIN);
+  }
+
+  // ---------- 단계별 분위기 ----------
+  // 시작은 보라, 첫 보스를 잡으면 불씨색, 둘째 보스를 잡으면 얼음빛. 보스가 있는 동안은 붉게 깜빡인다
+  const THEMES = [
+    { accent: new THREE.Color('#8a4dff'), sky: new THREE.Color('#c7ccff') },
+    { accent: new THREE.Color('#ff5a1f'), sky: new THREE.Color('#ffd6c0') },
+    { accent: new THREE.Color('#22d4ff'), sky: new THREE.Color('#c8f0ff') },
+  ];
+  const BOSS_THEME = { accent: new THREE.Color('#ff1e3c'), sky: new THREE.Color('#ffc0c8') };
+  function updateTheme(G, t, dt) {
+    const bossOn = G && G.boss;
+    const want = bossOn ? BOSS_THEME : THEMES[Math.min(THEMES.length - 1, G ? G.bossKills : 0)];
+    const k = Math.min(1, dt * 1.2);
+    R.theme.accent.lerp(want.accent, k);
+    R.theme.sky.lerp(want.sky, k);
+    const pulse = bossOn ? 0.65 + 0.35 * Math.sin(t * 6) : 0.6 + 0.3 * Math.sin(t * 1.6);
+    R.ground.material.emissive.copy(R.theme.accent);
+    R.ground.material.emissiveIntensity = pulse;
+    R.hemi.color.copy(R.theme.sky);
+    R.props.crystal.material.emissive.copy(R.theme.accent).multiplyScalar(0.8);
+    R.props.rune.material.color.copy(R.theme.accent);
+  }
+
+  // ---------- 바닥 장식물 ----------
+  // 세상을 CHUNK 크기 칸으로 나누고, 칸 번호로 정해지는 난수로 장식을 놓는다.
+  // 그래서 어디로 가도 끝없이 나오고, 다시 돌아오면 같은 자리에 같은 장식이 있다
+  function chunkProps(cx, cy) {
+    const key = cx + ',' + cy;
+    let list = R.propCache.get(key);
+    if (list) return list;
+    const h = Math.abs((cx * 73856093) ^ (cy * 19349663));
+    const rnd = seeded((h % 2147483646) + 1);
+    rnd(); rnd();
+    const total = PROP_KINDS.reduce((a, p) => a + p.w, 0);
+    const n = 2 + Math.floor(rnd() * 4);
+    list = [];
+    for (let i = 0; i < n; i++) {
+      let r = rnd() * total;
+      const k = PROP_KINDS.find(p => (r -= p.w) < 0) || PROP_KINDS[0];
+      list.push({
+        kind: k.kind,
+        x: (cx + rnd()) * CHUNK, y: (cy + rnd()) * CHUNK,
+        rot: rnd() * Math.PI * 2,
+        s: k.size[0] + rnd() * (k.size[1] - k.size[0]),
+        ph: rnd() * 10,
+      });
+    }
+    list = list.filter(p => Math.hypot(p.x, p.y) > 180); // 출발 지점은 비워 둔다
+    if (R.propCache.size > 600) R.propCache.clear();
+    R.propCache.set(key, list);
+    return list;
+  }
+
+  function drawProps(t) {
+    for (const k in R.props) R.props[k].count = 0;
+    const spanX = W / 2 + 200, spanZ = H / 2 / Math.sin(ELEV) + 260;
+    const x0 = Math.floor((target.x - spanX) / CHUNK), x1 = Math.floor((target.x + spanX) / CHUNK);
+    const z0 = Math.floor((target.z - spanZ) / CHUNK), z1 = Math.floor((target.z + spanZ) / CHUNK);
+    for (let cx = x0; cx <= x1; cx++) {
+      for (let cz = z0; cz <= z1; cz++) {
+        for (const p of chunkProps(cx, cz)) {
+          if (p.kind === 'rune') {
+            // 룬 마법진: 천천히 돌며 밝기가 오르내린다
+            const b = 0.35 + 0.25 * Math.sin(t * 1.5 + p.ph);
+            put(R.props.rune, p.x, 0.6, p.y, p.rot + t * 0.25, p.s, 1, p.s, tmpColor.setScalar(b));
+            continue;
+          }
+          put(R.props[p.kind], p.x, 0, p.y, p.rot, p.s, p.s, p.s);
+          put(R.shadow, p.x, 0.5, p.y, 0, p.s * 0.5, 1, p.s * 0.4);
+          if (p.kind === 'crystal') {
+            const b = 0.5 + 0.3 * Math.sin(t * 2.2 + p.ph);
+            putGlow(p.x, p.s * 0.45, p.y, p.s * 2.4, tmpColor.copy(R.theme.accent).multiplyScalar(b));
+          }
+        }
+      }
+    }
+    for (const k in R.props) finish(R.props[k]);
+  }
+
+  // 떠다니는 빛 알갱이: 바닥에서 천천히 떠올라 사라진다 (세상에 고정되고 화면 둘레로 감겨 돈다)
+  function drawMotes(t) {
+    const spanX = W + 240, spanZ = H / Math.sin(ELEV) + 240, TOP = 240;
+    const wrap = (v, span) => ((v % span) + span) % span;
+    for (let i = 0; i < 60; i++) {
+      const a = (i * 0.6180339) % 1, b = (i * 0.3819660 + 0.37) % 1;
+      const drift = Math.sin(t * 0.5 + i) * 30;
+      const x = target.x + wrap(a * spanX + drift - target.x, spanX) - spanX / 2;
+      const z = target.z + wrap(b * spanZ - target.z, spanZ) - spanZ / 2;
+      const h = wrap(b * TOP + t * (14 + (i % 5) * 5), TOP);
+      const fade = Math.sin((h / TOP) * Math.PI); // 바닥과 꼭대기에서 흐려진다
+      putGlow(x, h, z, 10 + (i % 4) * 4, tmpColor.copy(R.theme.accent).multiplyScalar(0.9 * fade));
+    }
   }
 
   // ---------- 주인공 3D 모델 (models/hero.js에 담긴 GLB) ----------
@@ -927,6 +1150,9 @@ const Render3D = (() => {
     setCamera((G ? G.p.x : 0) + shakeX, (G ? G.p.y : 0) + shakeY);
     R.shadow.count = 0;
     R.glow.count = 0;
+    updateTheme(G, t, dt);
+    drawProps(t);
+    drawMotes(t);
     animateHero(G, t, dt);
     if (G) {
       drawEnemies(G, t);
